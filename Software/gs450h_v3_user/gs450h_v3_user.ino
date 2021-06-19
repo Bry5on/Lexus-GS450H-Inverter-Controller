@@ -107,12 +107,14 @@ int Throt1Pin = A0; //throttle pedal analog inputs
 int Throt2Pin = A1;
 int ThrotVal=0; //value read from throttle pedal analog input
 int ThrotRange=0; //total range between min throttle and max throttle
-//int RegenRange=0; //value within pedal travel where regen starts
-//int AccelMinRange=0; //value within pedal travel where acceleration starts
-//int MaxRegenTorque=0; //max regen torque at min throttle position
+int16_t torque = 0; //torque command mapped from -3500 to 3500 for inverter control
 
-//double xRegenRPM[5] = {0,100,1000,6000,10000}; //interpolation table, speeds, for regen, rpm, mg2_speed
-//double yRegenTRQ[5] = {0,  0, 100, 100,   60}; //interpolation table, torques, for regen, %
+/////////////throttle input smoothing variables///////////////
+const int numReadings = 10;
+
+int readings[numReadings];      // the readings from the analog input
+int readIndex = 0;              // the index of the current reading
+int total = 0;                  // the running total
 
 /////////////temp sensor data////////////////////
 float vcc = 5.0;
@@ -208,9 +210,15 @@ ControlParams parameters;
 
 short get_torque()
 {
-    ThrotVal = analogRead(Throt1Pin);
+    total = total - readings[readIndex]; // subtract the last throttle reading
+    readings[readIndex] = analogRead(Throt1Pin); // read from the throttle sensor
+    total = total + readings[readIndex]; // add the throttle reading to the total
+    readIndex = readIndex + 1; // advance to the next position in the array
+    if (readIndex >= numReadings) readIndex = 0; // if we're at the end of the array...wrap around to the beginning
+    
+    ThrotVal = total / numReadings; // calculate the average of the throttle readings
     ThrotRange = parameters.Max_throttleVal - parameters.Min_throttleVal; //full range of min-max throttle
-    int16_t torque = 0, map_x, map_y;
+    int16_t map_x, map_y;
     uint8_t pedal_index, speed_index;
     int16_t pedal_range[6] = {parameters.Min_throttleVal, 	parameters.Min_throttleVal+ThrotRange/5, 	parameters.Min_throttleVal+2*ThrotRange/5, 	parameters.Min_throttleVal+3*ThrotRange/5, 	parameters.Min_throttleVal+4*ThrotRange/5, 	parameters.Max_throttleVal};
     mg2_speed_temp = mg2_speed;
@@ -330,6 +338,9 @@ void setup() {
     parameters.PumpPWM=0;
     EEPROM.write(0, parameters);
   }
+  for (int thisReading = 0; thisReading < numReadings; thisReading++) { //smoothing filter setup for throttle input
+    readings[thisReading] = 0;
+  }
 
 }
 
@@ -402,7 +413,7 @@ void control_inverter() {
     gear=get_gear();
     mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
     mg1_torque=((mg2_torque*5)/4);
-    if((mg2_speed>MG2MAXSPEED)||(mg2_speed<-MG2MAXSPEED))mg2_torque=0;
+    if((mg2_speed>MG2MAXSPEED)||(mg2_speed<-MG2MAXSPEED)) mg2_torque=0;
     if(gear==REVERSE)mg1_torque=0;
 
     //speed feedback
@@ -621,7 +632,7 @@ void PrintRawData()
   SerialDEBUG.print("Throttle Channel 2: ");
   SerialDEBUG.println(analogRead(Throt2Pin));
   SerialDEBUG.print("Commanded Torque: ");
-  SerialDEBUG.println(ThrotVal);
+  SerialDEBUG.println(torque);
   SerialDEBUG.print("Selected Direction: ");
   if (get_gear()==1) SerialDEBUG.println("REVERSE");
   if (get_gear()==2) SerialDEBUG.println("NEUTRAL");
