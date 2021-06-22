@@ -107,11 +107,11 @@ int Throt1Pin = A0; //throttle pedal analog inputs
 int Throt2Pin = A1;
 int ThrotVal=0; //value read from throttle pedal analog input
 int ThrotRange=0; //total range between min throttle and max throttle
-int16_t torque = 0; //torque command mapped from -3500 to 3500 for inverter control
+int maxDtorque=0, maxRtorque=0; //max torque values in variable form for math later
+int16_t torque = 0, smoothtorque = 0; //torque command mapped from -3500 to 3500 for inverter control
 
 /////////////throttle input smoothing variables///////////////
-const int numReadings = 10;
-
+const int numReadings = 20;
 int readings[numReadings];      // the readings from the analog input
 int readIndex = 0;              // the index of the current reading
 int total = 0;                  // the running total
@@ -127,37 +127,7 @@ float mg1_stat=0;
 float mg2_stat=0;
 ////////////////////////////////////////////////////
 
-/////////regen data///////////////
-/*
-int16_t pedalmap_drive[11][6] = {     //torque 0-3500 (full scale for MG2)
-{350, 	700, 	1050, 	1575, 	2450, 	3500},
-{175, 	525, 	1050, 	1575, 	2450, 	3500},
-{0, 	350, 	875, 	1575, 	2450, 	3500},
-{-350, 	105, 	765, 	1487, 	2406, 	3500},
-{-525, 	0, 	656, 	1400, 	2362, 	3500},
-{-525, 	-35, 	546, 	1312, 	2318, 	3500},
-{-392, 	-70, 	437, 	1225, 	2275, 	3500},
-{-312, 	-105, 	328, 	1137, 	2231, 	3500},
-{-259, 	-140, 	218, 	1050, 	2187, 	3500},
-{-221, 	-175, 	109, 	962, 	2143, 	3500},
-{-193, 	-140, 	0, 	875, 	2100, 	3500}};*/
-
-/////New Test Map - Drive - Low/////
-/*
-int16_t pedalmap_drive[11][6] = {     //torque 0-3500 (full scale for MG2)
-{350,   700,  1050,   1575,   2450,   3500},
-{175,   525,  1050,   1575,   2450,   3500},
-{0,   300,  650,  1300,   2300,   3500},
-{-260,  0,  320,  1000,   2100,   3500},
-{-260,  0,  320,  1000,   2100,   3500},
-{-260,  0,  320,  1000,   2100,   3500},
-{-260,  0,  320,  1000,   2100,   3500},
-{-260,  0,  320,  1000,   2100,   3500},
-{-260,  0,  320,  1000,   2100,   3500},
-{-220,  0,  320,  1000,   2100,   3500},
-{-190,  0,  320,  1000,   2100,   3500}};*/
-
-/////New Test Map - Drive - High/////
+/////Pedal Map - Drive - High/////
 int16_t pedalmap_drive[11][6] = {     //torque 0-3500 (full scale for MG2)
 {350,   700,  1050,   1575,   2450,   3500},
 {175,   525,  1050,   1575,   2450,   3500},
@@ -171,24 +141,16 @@ int16_t pedalmap_drive[11][6] = {     //torque 0-3500 (full scale for MG2)
 {-221,  -175,   109,  962,  2143,   3500},
 {-193,  -140,   0,  875,  2100,   3500}};
 
-/*
-int16_t pedalmap_reverse[5][6] = { //torque 0-3500 (full scale for MG2)
-{700, 	525, 	350, 	175, 	87, 	0},
-{350, 	-350, 	-525, 	-700, 	-875, 	-1050},
-{0, 	-700, 	-1050, 	-1330, 	-1575, 	-1750},
-{-350, 	-700, 	-1050, 	-1330, 	-1575, 	-1750},
-{-700, 	-875, 	-1120, 	-1330, 	-1575, 	-1750}};*/
-
-/////New Test Map - Reverse/////
+/////Pedal Map - Reverse/////
 int16_t pedalmap_reverse[5][6] = { //torque 0-3500 (full scale for MG2)
 {700,   525,  350,  175,  87,   0},
 {350,   70,   -210,   -490,   -770,   -1050},
-{0,   -700,   -1050,  -1330,  -1575,  -1750},
-{0,   -700,   -1050,  -1330,  -1575,  -1750},
-{0,   -700,   -1050,  -1330,  -1575,  -1750}};
+{0,   -350,   -700,  -1050,  -1400,  -1750},
+{0,   -350,   -700,  -1050,  -1400,  -1750},
+{0,   -350,   -700,  -1050,  -1400,  -1750}};
 
 int16_t speedrange_drive[11] = //rpm
-{-3500, 	-1750, 	0, 	1750, 	3500, 	5250, 	7000, 	8750, 	10500, 	12250, 	14000};
+{-3500, 	-1750, 	0, 	900, 	3500, 	5250, 	7000, 	8750, 	10500, 	12250, 	14000}; // speed index 3 being different works with forcing speed index to 3 below
 
 int16_t speedrange_reverse[5] = //rpm
 {-3500, 	-1750, 	0, 	1750, 	3500};
@@ -210,13 +172,7 @@ ControlParams parameters;
 
 short get_torque()
 {
-    total = total - readings[readIndex]; // subtract the last throttle reading
-    readings[readIndex] = analogRead(Throt1Pin); // read from the throttle sensor
-    total = total + readings[readIndex]; // add the throttle reading to the total
-    readIndex = readIndex + 1; // advance to the next position in the array
-    if (readIndex >= numReadings) readIndex = 0; // if we're at the end of the array...wrap around to the beginning
-    
-    ThrotVal = total / numReadings; // calculate the average of the throttle readings
+    ThrotVal = analogRead(Throt1Pin); // read from the throttle sensor
     ThrotRange = parameters.Max_throttleVal - parameters.Min_throttleVal; //full range of min-max throttle
     int16_t map_x, map_y;
     uint8_t pedal_index, speed_index;
@@ -229,6 +185,7 @@ short get_torque()
         }
         pedal_index = map(ThrotVal, pedal_range[0], pedal_range[5], 0, 5);
         speed_index = map(mg2_speed_temp, speedrange_drive[0], speedrange_drive[10], 0, 10);
+        if(mg2_speed_temp < 1750 && mg2_speed_temp > 900) speed_index = 3; //force speed index to 3 instead of 2 so that interpolation works from 900rpm to 0 for regen instead of 1750-0
         //SerialDEBUG.print("Pedal map - Pedal/Speed "); SerialDEBUG.print(pedal_index); SerialDEBUG.print("/"); SerialDEBUG.println(speed_index);
 
         if (pedal_index >= 5 && speed_index >= 10) {
@@ -272,9 +229,18 @@ short get_torque()
     }
 
     if(gear==NEUTRAL) torque = 0;//no torque in neutral
-    if(torque < -70 && gear==DRIVE) digitalWrite(Out1,HIGH); //Set Out1 as brake light output during regen greater than normal engine coast, down to 3.75mph in jag
+
+    total = total - readings[readIndex]; // subtract the last torque command
+    readings[readIndex] = torque; // pull in the latest torque command
+    total = total + readings[readIndex]; // add the torque command to the total
+    readIndex = readIndex + 1; // advance to the next position in the array
+    if (readIndex >= numReadings) readIndex = 0; // if we're at the end of the array...wrap around to the beginning
+    
+    smoothtorque = total / numReadings; // calculate the average of the torque commands
+    
+    if(smoothtorque < -70 && gear==DRIVE) digitalWrite(Out1,HIGH); //Set Out1 as brake light output during regen greater than normal engine coast, down to 3.75mph in jag
     else digitalWrite(Out1,LOW); //turn off Out1 as brake light when not regenerating
-    return torque; //return torque
+    return smoothtorque; //return torque
 }
 
 ISA Sensor;  //Instantiate ISA Module Sensor object to measure current and voltage 
@@ -283,13 +249,15 @@ void setup() {
 
   Can0.begin(CAN_BPS_500K);  //CAN bus for V2. Use for isa shunt comms etc
   Sensor.begin(0,500);  //Start ISA object on CAN 0 at 500 kbps
+  //Can1.begin(CAN_BPS_500K);  //CAN bus for V2. Use for isa shunt comms etc
+  //Sensor.begin(1,500);  //Start ISA object on CAN 1 at 500 kbps
   
   pinMode(pin_inv_req, OUTPUT);
   digitalWrite(pin_inv_req, 1);
   pinMode(13, OUTPUT);  //led
   pinMode(OilPumpPower, OUTPUT);  //Oil pump control relay
   digitalWrite(OilPumpPower,HIGH);  //turn on oil pump 12v power supply.
-   analogWrite(OilPumpPWM,125);  //set 50% pwm to oil pump at 1khz for testing
+  analogWrite(OilPumpPWM,125);  //set 50% pwm to oil pump at 1khz for testing
 
   pinMode(InvPower, OUTPUT);  //Inverter Relay
   pinMode(Out1, OUTPUT);  //GP output one
@@ -338,9 +306,11 @@ void setup() {
     parameters.PumpPWM=0;
     EEPROM.write(0, parameters);
   }
-  for (int thisReading = 0; thisReading < numReadings; thisReading++) { //smoothing filter setup for throttle input
+  for (int thisReading = 0; thisReading < numReadings; thisReading++) { //smoothing filter setup for torque command
     readings[thisReading] = 0;
   }
+  maxDtorque = parameters.Max_Drive_Torque; //values for calculating a torque map
+  maxRtorque = parameters.Max_Reverse_Torque; //values for calculating a torque map
 
 }
 
@@ -371,20 +341,20 @@ v100,i200,p35,m3000,n4000,o20,r100,q50*
 digitalWrite(13,!digitalRead(13));//blink led every time we fire this interrrupt.
 
 Serial2.print("v");//dc bus voltage
-Serial2.print(dc_bus_voltage);//voltage derived from Lexus inverter
-//Serial2.print(Sensor.Voltage);//voltage derived from ISA shunt
+//Serial2.print(dc_bus_voltage);//voltage derived from Lexus inverter
+Serial2.print(Sensor.Voltage);//voltage derived from ISA shunt
 Serial2.print(",i");//dc current
 Serial2.print(Sensor.Amperes);//current derived from ISA shunt
-Serial2.print(0);
+//Serial2.print(0);
 Serial2.print(",p");//total motor power
 Serial2.print(Sensor.KW);//Power value derived from ISA Shunt
-Serial2.print(0);
+//Serial2.print(0);
 Serial2.print(",m");//mg1 rpm
 Serial2.print(abs(mg1_speed));
 Serial2.print(",n");//mg2 rpm
 Serial2.print(abs(mg2_speed));
-Serial2.print(",o");//mg1 temp. Using water temp for now
-Serial2.print(temp_inv_water);
+Serial2.print(",o");//mg1 temp. Using inductor temp
+Serial2.print(temp_inv_inductor);
 Serial2.print(",r");//mg2 temp. Using water temp for now
 Serial2.print(temp_inv_water);
 Serial2.print(",q");// pwm percent on oil pump
@@ -414,7 +384,7 @@ void control_inverter() {
     mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
     mg1_torque=((mg2_torque*5)/4);
     if((mg2_speed>MG2MAXSPEED)||(mg2_speed<-MG2MAXSPEED)) mg2_torque=0;
-    if(gear==REVERSE)mg1_torque=0;
+    //if(gear==REVERSE)mg1_torque=0;
 
     //speed feedback
     speedSum=mg2_speed+mg1_speed;
@@ -686,19 +656,19 @@ void PrintRawData()
 void Cal_minthrottle()
 {
   SerialDEBUG.println("");
-     SerialDEBUG.print("Configured min throttle value: ");
-     parameters.Min_throttleVal=(analogRead(Throt1Pin));
-     if(parameters.Min_throttleVal<0) parameters.Min_throttleVal=0;//noting lower than 0 for min.
-     SerialDEBUG.println(parameters.Min_throttleVal);
+  SerialDEBUG.print("Configured min throttle value: ");
+  parameters.Min_throttleVal=(analogRead(Throt1Pin));
+  if(parameters.Min_throttleVal<0) parameters.Min_throttleVal=0;//noting lower than 0 for min.
+  SerialDEBUG.println(parameters.Min_throttleVal);
 }
 
 void Cal_maxthrottle()
 {
   SerialDEBUG.println("");
-   SerialDEBUG.print("Configured max throttle value: ");
-   parameters.Max_throttleVal=(analogRead(Throt1Pin));
-   if (parameters.Max_throttleVal>1000) parameters.Max_throttleVal=1000;//limit on max value
-   SerialDEBUG.println(parameters.Max_throttleVal);
+  SerialDEBUG.print("Configured max throttle value: ");
+  parameters.Max_throttleVal=(analogRead(Throt1Pin));
+  if (parameters.Max_throttleVal>1000) parameters.Max_throttleVal=1000;//limit on max value
+  SerialDEBUG.println(parameters.Max_throttleVal);
 
 }
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -709,24 +679,26 @@ void Cal_maxthrottle()
 void Cal_torque_D()
 {
   SerialDEBUG.println("");
-   SerialDEBUG.print("Configured drive torque: ");
-     if (SerialDEBUG.available()) {
+  SerialDEBUG.print("Configured drive torque: ");
+  if (SerialDEBUG.available()) {
     parameters.Max_Drive_Torque = SerialDEBUG.parseInt();
   }
   if(parameters.Max_Drive_Torque>3500) parameters.Max_Drive_Torque=3500;//limit max drive torque to within range
   SerialDEBUG.println(parameters.Max_Drive_Torque);
-  }
+  maxDtorque = parameters.Max_Drive_Torque;
+}
 
 void Cal_torque_R()
 {
   SerialDEBUG.println("");
-   SerialDEBUG.print("Configured reverse torque: ");
-     if (SerialDEBUG.available()) {
+  SerialDEBUG.print("Configured reverse torque: ");
+  if (SerialDEBUG.available()) {
     parameters.Max_Reverse_Torque = SerialDEBUG.parseInt();
   }
   if(parameters.Max_Reverse_Torque>3500) parameters.Max_Reverse_Torque=3500;//limit max reverse torque to within range
   SerialDEBUG.println(parameters.Max_Reverse_Torque);
-  }
+  maxRtorque = parameters.Max_Reverse_Torque;
+}
 
 /////////////////////////////////////////////////////////////////////////////////////////
 
@@ -734,67 +706,62 @@ void Cal_torque_R()
 void SetPumpSpeed()
 {
   SerialDEBUG.println("");
-   SerialDEBUG.print("Configured gearbox oil pump speed: ");
-        if (SerialDEBUG.available()) {
+  SerialDEBUG.print("Configured gearbox oil pump speed: ");
+  if (SerialDEBUG.available()) {
     parameters.PumpPWM = SerialDEBUG.parseInt();
-  if(parameters.PumpPWM>100) parameters.PumpPWM=100; //limit to max 100%
-  if(parameters.PumpPWM<0) parameters.PumpPWM=0;//limit to 0
+    if(parameters.PumpPWM>100) parameters.PumpPWM=100; //limit to max 100%
+    if(parameters.PumpPWM<0) parameters.PumpPWM=0;//limit to 0
   }
   SerialDEBUG.println(parameters.PumpPWM);
-  }
+}
 
 void changeGear()
 {
-if (mg2_speed<100 && mg1_speed<100) //only shift at very low rpm (ideally 0 but leave a little play)
-{
-
-  if(digitalRead(Low_In)) //shift to low gear on command at ~0 speed regardless of above setting
+  if (mg2_speed<100 && mg1_speed<100) //only shift at very low rpm (ideally 0 but leave a little play)
   {
-    digitalWrite(TransSL1,HIGH);
-    digitalWrite(TransSL2,HIGH);
-    digitalWrite(TransSP,LOW);
+  
+    if(digitalRead(Low_In)) //shift to low gear on command at ~0 speed regardless of above setting
+    {
+      digitalWrite(TransSL1,HIGH);
+      digitalWrite(TransSL2,HIGH);
+      digitalWrite(TransSP,LOW);
+    }
+    else if(parameters.selGear)    //high gear
+    {
+      digitalWrite(TransSL1,LOW);
+      digitalWrite(TransSL2,LOW);
+      digitalWrite(TransSP,LOW);    //yes we are leaving them all off for initial proof of this version.
+    }
+  
+    if(!parameters.selGear)   //low gear
+    {
+      digitalWrite(TransSL1,HIGH);
+      digitalWrite(TransSL2,HIGH);
+      digitalWrite(TransSP,LOW);
+    }
   }
-  else if(parameters.selGear)    //high gear
-  {
-    digitalWrite(TransSL1,LOW);
-    digitalWrite(TransSL2,LOW);
-    digitalWrite(TransSP,LOW);    //yes we are leaving them all off for initial proof of this version.
-  }
-
-  if(!parameters.selGear)   //low gear
-  {
-    digitalWrite(TransSL1,HIGH);
-    digitalWrite(TransSL2,HIGH);
-    digitalWrite(TransSP,LOW);
-  }
-
-
-}
-
 }
 
 
 void processTemps()
 {
-mg1_stat=readThermistor(analogRead(MG1Temp));
-mg2_stat=readThermistor(analogRead(MG2Temp));
-
+  mg1_stat=readThermistor(analogRead(MG1Temp));
+  mg2_stat=readThermistor(analogRead(MG2Temp));
 }
 
 
 
 //////////////Dilbert's temp sensor routine////////////////////////////
-float readThermistor(int adc){
-
-
-float raw = adc;
-float voltage = raw*adc_step;
-
-float Rt = (voltage * Rtop)/(vcc-voltage);
-
-float temp = (1/(1.0/To + (1.0/B)*log(Rt/Ro)))-273;
-
-return temp;
+float readThermistor(int adc)
+{
+  float raw = adc;
+  float voltage = raw*adc_step;
+  
+  float Rt = (voltage * Rtop)/(vcc-voltage);
+  
+  float temp = (1/(1.0/To + (1.0/B)*log(Rt/Ro)))-273;
+  
+  return temp;
 }
 ///////////////////////////////////////////////////////////////////////
 
@@ -806,10 +773,10 @@ void loop() {
 
   if(timer_diag.check())
   {
-  changeGear();
-  processTemps();
-   handle_wifi();
-analogWrite(OilPumpPWM,map(parameters.PumpPWM, 0, 100, 0, 255)); //set oil pump pwm
+    changeGear();
+    processTemps();
+    handle_wifi();
+    analogWrite(OilPumpPWM,map(parameters.PumpPWM, 0, 100, 0, 255)); //set oil pump pwm
   }
-    checkforinput(); //Check keyboard for user input
+  checkforinput(); //Check keyboard for user input
 }
