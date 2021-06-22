@@ -159,13 +159,13 @@ int16_t speedrange_reverse[5] = //rpm
 
 typedef struct
 {
-uint8_t  version; //eeprom version stored
-int Max_Drive_Torque=0;
-int Max_Reverse_Torque=0;
-unsigned int Min_throttleVal=0;
-unsigned int Max_throttleVal=0;
-unsigned int PumpPWM=0;
-bool  selGear=HIGH;
+  uint8_t  version; //eeprom version stored
+  int Max_Drive_Torque=0;
+  int Max_Reverse_Torque=0;
+  unsigned int Min_throttleVal=0;
+  unsigned int Max_throttleVal=0;
+  unsigned int PumpPWM=0;
+  bool  selGear=HIGH;
 }ControlParams;
 
 ControlParams parameters;
