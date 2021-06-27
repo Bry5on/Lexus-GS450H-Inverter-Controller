@@ -740,6 +740,12 @@ void changeGear()
       digitalWrite(TransSP,LOW);
     }
   }
+  else if(!digitalRead(Low_In) && parameters.selGear && abs(torque) < 25) //shift into high gear at low torque when shifter is in high and interface setting is in high
+  {
+    digitalWrite(TransSL1,LOW);
+    digitalWrite(TransSL2,LOW);
+    digitalWrite(TransSP,LOW);
+  }
 }
 
 
