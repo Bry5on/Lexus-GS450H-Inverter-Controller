@@ -54,6 +54,8 @@
  template<class T> inline Print &operator <<(Print &obj, T arg) { obj.print(arg); return obj; } //Allow streaming
 
 
+
+
 byte get_gear()
 {
   if(digitalRead(IN1))
@@ -70,8 +72,13 @@ byte get_gear()
   }
 }
 
+////////// CAN variables////////////////
+word RPM;
+CAN_FRAME outframe;  //A structured variable according to due_can library for transmitting CAN data.
 
 Metro timer_htm=Metro(10);
+Metro timer_Frames200 = Metro(200);
+Metro timer_Frames10 = Metro(10);
 
 byte mth_data[100];
 byte htm_data_setup[80]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,25,0,0,0,0,0,0,0,128,0,0,0,128,0,0,0,37,1};
@@ -92,6 +99,7 @@ short mg1_torque=0,
       mg1_speed=-1,
       mg2_speed=-1,
       mg2_speed_temp=-1;
+int vehicle_doublespeed = 0;
 
 byte inv_status=1,
      gear=get_gear(); //get this from your transmission
@@ -119,12 +127,16 @@ int total = 0;                  // the running total
 /////////////temp sensor data////////////////////
 float vcc = 5.0;
 float adc_step = 3.3/1023.0;
-float Rtop = 1800.0;
+float Rtop = 1800.0; //swap out a 20k resistor here to get more temp fidelity in lower ranges
 float Ro = 47000;
 float To = 25+273;
 float B = 3500;
 float mg1_stat=0;
 float mg2_stat=0;
+float high_stat=0;
+
+unsigned long delayStart = 0; // the time the delay started, oil press light
+bool delayRunning = false; // true if still waiting for delay to finish
 ////////////////////////////////////////////////////
 
 /////Pedal Map - Drive - High/////
@@ -249,14 +261,14 @@ void setup() {
 
   Can0.begin(CAN_BPS_500K);  //CAN bus for V2. Use for isa shunt comms etc
   Sensor.begin(0,500);  //Start ISA object on CAN 0 at 500 kbps
-  //Can1.begin(CAN_BPS_500K);  //CAN bus for V2. Use for isa shunt comms etc
+  Can1.begin(CAN_BPS_500K);  //CAN bus for V2. Use for gauges
   //Sensor.begin(1,500);  //Start ISA object on CAN 1 at 500 kbps
   
   pinMode(pin_inv_req, OUTPUT);
   digitalWrite(pin_inv_req, 1);
   pinMode(13, OUTPUT);  //led
   pinMode(OilPumpPower, OUTPUT);  //Oil pump control relay
-  //digitalWrite(OilPumpPower,HIGH);  //turn on oil pump 12v power supply. Commented out to use for oil light
+  digitalWrite(OilPumpPower,HIGH);  //turn on oil pump 12v power supply. Use for oil light, flash on at startup
   analogWrite(OilPumpPWM,125);  //set 50% pwm to oil pump at 1khz for testing
 
   pinMode(InvPower, OUTPUT);  //Inverter Relay
@@ -311,6 +323,8 @@ void setup() {
   }
   maxDtorque = parameters.Max_Drive_Torque; //values for calculating a torque map
   maxRtorque = parameters.Max_Reverse_Torque; //values for calculating a torque map
+  delayStart = millis();   // start delay
+  delayRunning = true; // not finished yet
 
 }
 
@@ -353,8 +367,8 @@ Serial2.print(",m");//mg1 rpm
 Serial2.print(abs(mg1_speed));
 Serial2.print(",n");//mg2 rpm
 Serial2.print(abs(mg2_speed));
-Serial2.print(",o");//mg1 temp. Using inductor temp
-Serial2.print(temp_inv_inductor);
+Serial2.print(",o");//mg1 temp. Using higher of two stator temps
+Serial2.print(high_stat);
 Serial2.print(",r");//mg2 temp. Using water temp for now
 Serial2.print(temp_inv_water);
 Serial2.print(",q");// pwm percent on oil pump
@@ -753,7 +767,15 @@ void processTemps()
 {
   mg1_stat=readThermistor(analogRead(MG1Temp));
   mg2_stat=readThermistor(analogRead(MG2Temp));
-  if(mg1_stat > 125 || mg2_stat > 125) digitalWrite(OilPumpPower,HIGH);  //turn on oil light when either of motor temps are high. Max operable is 150C
+  if(mg1_stat > 120 || mg2_stat > 120) digitalWrite(OilPumpPower,HIGH);  //turn on oil pressure light when either of motor temps are high. Max operable is 150C
+  else if (delayRunning && ((millis() - delayStart) <= 200)) digitalWrite(OilPumpPower, HIGH); // oil pressure light on during startup
+  else 
+  {
+    delayRunning = false; // prevent delay code being run more then once
+    digitalWrite(OilPumpPower,LOW);
+  }
+  if(mg1_stat > mg2_stat) high_stat = mg1_stat; //set high stator temp for display via WiFi and gauge
+  else high_stat = mg2_stat;
 }
 
 
@@ -761,22 +783,81 @@ void processTemps()
 //////////////Dilbert's temp sensor routine////////////////////////////
 float readThermistor(int adc)
 {
-  float raw = adc;
+  float raw = (float)adc;
   float voltage = raw*adc_step;
   
-  float Rt = (voltage * Rtop)/(vcc-voltage);
+  float Rt = (voltage * Rtop)/(vcc-voltage); //Rtop = 1800, vcc = 5.0 - swap Rtop with 20k
   
-  float temp = (1/(1.0/To + (1.0/B)*log(Rt/Ro)))-273;
+  float temp = (1/(1.0/To + (1.0/B)*log(Rt/Ro)))-273; //Ro = 47k, B = 3500, To = 25+273 = 298
+  //
   
   return temp;
 }
 ///////////////////////////////////////////////////////////////////////
+
+void Frames10MS() //send this message out for the CAN based gauge interpreter
+{
+  if(timer_Frames10.check())
+  {
+    RPM=abs(mg1_speed) / 2.28; //output shaft rotational speed
+    vehicle_doublespeed = abs(mg1_speed) / 52; //mg1_speed is 1.2*mg2_speed, mg2_speed is 1.9*output shaft speed, mg1=2.28*output shaft, 4000rpm output shaft is 88mph. mg1*.009649 = ground speed, 1/.009649 = 103.63 (~104)
+    outframe.id = 0x0AA;            // Set our transmission address ID
+    outframe.length = 8;            // Data payload 8 bytes
+    outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
+    outframe.rtr = 1;                 //No request
+    outframe.data.bytes[0] = map(torque, 0, 3500, 0, 100); // Torque percentage requested (1bit=1%)
+    outframe.data.bytes[1] = vehicle_doublespeed; //Two times the car's ground speed in mph * 2
+    outframe.data.bytes[2] = (int) high_stat; //higher of both stator temps in C. Gauge range 80 - 150C
+    outframe.data.bytes[3] = (int) temp_inv_water; //coolant temp in C. Gauge range 0 - 100C
+    outframe.data.bytes[4] = lowByte(RPM);
+    outframe.data.bytes[5] = highByte(RPM);
+    outframe.data.bytes[6] = (int) abs(Sensor.Amperes) / 2; //Measured current value in A/2
+    outframe.data.bytes[7] = 0x00;
+
+    Can1.sendFrame(outframe); 
+  }    
+}
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+////////////Send these frames every 200ms /////////////////////////////////////////
+/*void Frames200MS()
+{
+  if(timer_Frames200.check())
+  {
+digitalWrite(13,!digitalRead(13));//blink led every time we fire this interrrupt.
+
+  if(can_status)
+  {
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+        outframe.id = 0x1D2;            // current selected gear message
+        outframe.length = 5;            // Data payload 5 bytes
+        outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
+        outframe.rtr=1;                 //No request
+        outframe.data.bytes[0]=shiftPos;  //e1=P  78=D  d2=R  b4=N
+        outframe.data.bytes[1]=0x0c;  
+        outframe.data.bytes[2]=0x8f;
+        outframe.data.bytes[3]=Gcount;
+        outframe.data.bytes[4]=0xf0;
+        Can1.sendFrame(outframe);
+        ///////////////////////////
+        //Byte 3 is a counter running from 0D through to ED and then back to 0D///
+        //////////////////////////////////////////////
+         
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+  }
+  }
+}*/
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 
 Metro timer_diag = Metro(1100);
 
 void loop() {
 
   control_inverter();
+  Frames10MS();
+  //Frames200MS();
 
   if(timer_diag.check())
   {
