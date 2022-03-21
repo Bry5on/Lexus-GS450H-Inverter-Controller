@@ -398,7 +398,21 @@ void control_inverter() {
     }
     gear=get_gear();
     mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
-    mg1_torque=((mg2_torque*5)/4);
+    //mg1_torque=((mg2_torque*5)/4);
+    if(mg2_torque>0) { //If we're driving forward, split torque to use mg2 first, then mg1 when necessary. Optimized for high gear
+      if (mg2_torque < 700) { //up to 20% throttle input
+        mg2_torque = mg2_torque*5/2; //use up to 50% of mg2 available torque
+        mg1_torque = 0;
+      }
+      else if (mg2_torque < 1750) { //from 20-50% throttle input
+        mg1_torque = (mg2_torque-700)*25/12;//*5/2*5/6; //use up to 50% mg1 available torque
+        mg2_torque = 1750; //use exactly 50% mg2 available torque
+      }
+    }
+    else {
+      //mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
+      mg1_torque=((mg2_torque*5)/4);
+    }
     if((mg2_speed>MG2MAXSPEED)||(mg2_speed<-MG2MAXSPEED)) mg2_torque=0;
     //if(gear==REVERSE)mg1_torque=0;
 
