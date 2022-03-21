@@ -134,6 +134,8 @@ float B = 3500;
 float mg1_stat=0;
 float mg2_stat=0;
 float high_stat=0;
+uint8_t StatorCAN=0;
+uint8_t CoolantCAN=0;
 
 unsigned long delayStart = 0; // the time the delay started, oil press light
 bool delayRunning = false; // true if still waiting for delay to finish
@@ -767,7 +769,7 @@ void processTemps()
 {
   mg1_stat=readThermistor(analogRead(MG1Temp));
   mg2_stat=readThermistor(analogRead(MG2Temp));
-  if(mg1_stat > 120 || mg2_stat > 120) digitalWrite(OilPumpPower,HIGH);  //turn on oil pressure light when either of motor temps are high. Max operable is 150C
+  if(mg1_stat > 120 || mg2_stat > 120 || Sensor.Voltage < 286) digitalWrite(OilPumpPower,HIGH);  //turn on oil pressure light when battery voltage is below 286V (2.8V/cell) or either of motor temps are high. Max operable is 150C
   else if (delayRunning && ((millis() - delayStart) <= 200)) digitalWrite(OilPumpPower, HIGH); // oil pressure light on during startup
   else 
   {
@@ -801,18 +803,36 @@ void Frames10MS() //send this message out for the CAN based gauge interpreter
   {
     RPM=abs(mg1_speed) / 2.28; //output shaft rotational speed
     vehicle_doublespeed = abs(mg1_speed) / 52; //mg1_speed is 1.2*mg2_speed, mg2_speed is 1.9*output shaft speed, mg1=2.28*output shaft, 4000rpm output shaft is 88mph. mg1*.009649 = ground speed, 1/.009649 = 103.63 (~104)
+    CoolantCAN = temp_inv_water;
+    StatorCAN = high_stat;
     outframe.id = 0x0AA;            // Set our transmission address ID
     outframe.length = 8;            // Data payload 8 bytes
     outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
     outframe.rtr = 1;                 //No request
     outframe.data.bytes[0] = map(torque, 0, 3500, 0, 100); // Torque percentage requested (1bit=1%)
     outframe.data.bytes[1] = vehicle_doublespeed; //Two times the car's ground speed in mph * 2
-    outframe.data.bytes[2] = (int) high_stat; //higher of both stator temps in C. Gauge range 80 - 150C
-    outframe.data.bytes[3] = (int) temp_inv_water; //coolant temp in C. Gauge range 0 - 100C
+    outframe.data.bytes[2] = StatorCAN; //higher of both stator temps in C. Gauge range 80 - 150C
+    outframe.data.bytes[3] = CoolantCAN; //coolant temp in C. Gauge range 0 - 100C
     outframe.data.bytes[4] = lowByte(RPM);
     outframe.data.bytes[5] = highByte(RPM);
-    outframe.data.bytes[6] = (int) abs(Sensor.Amperes) / 2; //Measured current value in A/2
+    outframe.data.bytes[6] = (uint8_t) abs(Sensor.Amperes) / 2; //Measured current value in A/2
     outframe.data.bytes[7] = 0x00;
+
+    Can1.sendFrame(outframe); 
+
+    outframe.id = 0x05C;            // Set our transmission address ID, OBD2 standard oil temp: https://en.wikipedia.org/wiki/OBD-II_PIDs
+    outframe.length = 1;            // Data payload 1 byte
+    outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
+    outframe.rtr = 1;                 //No request
+    outframe.data.bytes[0] = StatorCAN+40; //higher of both stator temps in C+40. Gauge range 80 - 150C
+
+    Can1.sendFrame(outframe); 
+
+    outframe.id = 0x005;            // Set our transmission address ID, OBD2 standard coolant temp: https://en.wikipedia.org/wiki/OBD-II_PIDs
+    outframe.length = 1;            // Data payload 1 byte
+    outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
+    outframe.rtr = 1;                 //No request
+    outframe.data.bytes[0] = CoolantCAN+40; //higher of both stator temps in C+40. Gauge range 0 - 100C
 
     Can1.sendFrame(outframe); 
   }    
