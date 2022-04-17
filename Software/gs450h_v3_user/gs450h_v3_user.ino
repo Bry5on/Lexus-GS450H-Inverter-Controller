@@ -253,6 +253,7 @@ short get_torque()
     smoothtorque = total / numReadings; // calculate the average of the torque commands
     
     if(smoothtorque < -70 && gear==DRIVE) digitalWrite(Out1,HIGH); //Set Out1 as brake light output during regen greater than normal engine coast, down to 3.75mph in jag
+    else if(ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64)) digitalWrite(Out1,HIGH); //Set Out1 as brake light output when throttle pedal is <1.5%
     else digitalWrite(Out1,LOW); //turn off Out1 as brake light when not regenerating
     return smoothtorque; //return torque
 }
