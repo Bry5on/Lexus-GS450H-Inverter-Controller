@@ -782,14 +782,14 @@ void changeGear()
       digitalWrite(TransSL2,HIGH);
       digitalWrite(TransSP,LOW);
     }
-    else if(parameters.selGear)    //high gear
+    else if(parameters.selGear)    //interface setting is in high gear, select high gear if the shifter isn't already selecting low gear
     {
       digitalWrite(TransSL1,LOW);
       digitalWrite(TransSL2,LOW);
       digitalWrite(TransSP,LOW);    //yes we are leaving them all off for initial proof of this version.
     }
   
-    if(!parameters.selGear)   //low gear
+    if(!parameters.selGear)   //interface setting is in low gear, select low gear no matter what
     {
       digitalWrite(TransSL1,HIGH);
       digitalWrite(TransSL2,HIGH);
@@ -797,6 +797,12 @@ void changeGear()
     }
   }
   else if(!digitalRead(Low_In) && parameters.selGear && abs(mg2_torque) < 40) //shift into high gear at low mg2 torque when shifter is in high and interface setting is in high
+  {
+    digitalWrite(TransSL1,LOW);
+    digitalWrite(TransSL2,LOW);
+    digitalWrite(TransSP,LOW);
+  }
+  else if(digitalRead(Low_In) && abs(mg2_torque) < 40) //shift into low gear at low mg2 torque when shifter is in low
   {
     digitalWrite(TransSL1,LOW);
     digitalWrite(TransSL2,LOW);
