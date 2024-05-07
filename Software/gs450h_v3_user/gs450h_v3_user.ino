@@ -804,8 +804,8 @@ void changeGear()
   }
   else if(digitalRead(Low_In) && abs(mg2_torque) < 40) //shift into low gear at low mg2 torque when shifter is in low
   {
-    digitalWrite(TransSL1,LOW);
-    digitalWrite(TransSL2,LOW);
+    digitalWrite(TransSL1,HIGH);
+    digitalWrite(TransSL2,HIGH);
     digitalWrite(TransSP,LOW);
   }
 }
