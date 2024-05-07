@@ -400,7 +400,7 @@ void control_inverter() {
     gear=get_gear();
     mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
     //mg1_torque=((mg2_torque*5)/4);
-    if(mg2_torque>0) { //If we're driving forward, split torque to use mg2 first, then mg1 when necessary. Optimized for high gear
+    /*if(mg2_torque>0) { //If we're driving forward, split torque to use mg2 first, then mg1 when necessary. Optimized for high gear
       if (mg2_torque < 700) { //up to 20% throttle input
         mg2_torque = mg2_torque*5/2; //use up to 50% of mg2 available torque
         mg1_torque = 0;
@@ -409,8 +409,33 @@ void control_inverter() {
         mg1_torque = (mg2_torque-700)*25/12;//*5/2*5/6; //use up to 50% mg1 available torque
         mg2_torque = 1750; //use exactly 50% mg2 available torque
       }
+      else { //ramp both motors up equally from 50%
+        mg1_torque=((mg2_torque*5)/4);
+      }
+    }*/
+    if(mg2_torque>0) { //If we're driving forward, split torque to use mg1 first, then mg2 when necessary. Optimized for high gear
+      if (mg2_torque < 1050) { //up to 30% throttle input
+        mg1_torque = mg2_torque*25/12; //use up to 50% of mg1 available torque
+        mg2_torque = 0; //use no torque from mg2, this will allow shifting
+      }
+      else if (mg2_torque < 1750) { //from 20-50% throttle input
+        mg2_torque = (mg2_torque-1050)*5/2; //use up to 50% mg2 available torque
+        mg1_torque = 1750*5/4; //use exactly 50% mg1 available torque
+      }
+      else { //ramp both motors up equally from 50%
+        mg1_torque=((mg2_torque*5)/4);
+      }
     }
-    else {
+    else if (mg2_torque<0) { //this is for regen and reverse, use only mg1 for consistent behavior under regen regardless of gear choice
+      if (mg2_torque<-2100) { //prevent maxing out of mg1, cap the output - 4375 mg1 max, load share
+        mg1_torque = mg2_torque*5/4; //leaves mg2 set as normal for load sharing
+      }
+      else {
+        mg1_torque = mg2_torque*25/12; // use mg1 for all torque, up to max of 4375 from if statement above
+        mg2_torque = 0; //set mg2 to no torque
+      }
+    }
+    else { //catch all, this should only be active at 0 torque
       //mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
       mg1_torque=((mg2_torque*5)/4);
     }
@@ -771,7 +796,7 @@ void changeGear()
       digitalWrite(TransSP,LOW);
     }
   }
-  else if(!digitalRead(Low_In) && parameters.selGear && abs(torque) < 25) //shift into high gear at low torque when shifter is in high and interface setting is in high
+  else if(!digitalRead(Low_In) && parameters.selGear && abs(torque) < 1000) //shift into high gear at low torque (ie: only using mg1) when shifter is in high and interface setting is in high
   {
     digitalWrite(TransSL1,LOW);
     digitalWrite(TransSL2,LOW);
