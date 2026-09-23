@@ -884,6 +884,31 @@ void Frames10MS() //send this message out for the CAN based gauge interpreter
 
     Can0.sendFrame(outframe);
     Can1.sendFrame(outframe);
+
+    // Unsolicited OBD-II Mode 01 responses for the CAN2-002 (Can1 only)
+    uint8_t vss_kph = (uint8_t)constrain((int)(RPM / 29.6f), 0, 255);
+    outframe.id = 0x7E8;
+    outframe.length = 8;
+    outframe.extended = 0;
+    outframe.rtr = 0;
+    outframe.data.bytes[0] = 0x03;
+    outframe.data.bytes[1] = 0x41;
+    outframe.data.bytes[4] = 0;
+    outframe.data.bytes[5] = 0;
+    outframe.data.bytes[6] = 0;
+    outframe.data.bytes[7] = 0;
+
+    outframe.data.bytes[2] = 0x05;              // coolant
+    outframe.data.bytes[3] = CoolantCAN + 40;
+    Can1.sendFrame(outframe);
+
+    outframe.data.bytes[2] = 0x5C;              // oil / stator
+    outframe.data.bytes[3] = StatorCAN + 40;
+    Can1.sendFrame(outframe);
+
+    outframe.data.bytes[2] = 0x0D;              // VSS km/h, 205/70-15 + 3.73
+    outframe.data.bytes[3] = vss_kph;
+    Can1.sendFrame(outframe);
   }    
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
