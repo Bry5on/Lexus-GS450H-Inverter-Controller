@@ -909,6 +909,15 @@ void Frames10MS() //send this message out for the CAN based gauge interpreter
     outframe.data.bytes[2] = 0x0D;              // VSS km/h, 205/70-15 + 3.73
     outframe.data.bytes[3] = vss_kph;
     Can1.sendFrame(outframe);
+
+    // PID 0C: report |amps|*10 as engine RPM so an OBD tach reads like an ammeter
+    // OBD rpm = (256*A + B) / 4  →  encode (amps*10)*4 = amps*40
+    uint16_t tach_rpm_enc = (uint16_t)constrain((int)(fabsf(Sensor.Amperes) * 40.0f), 0, 65535);
+    outframe.data.bytes[0] = 0x04;
+    outframe.data.bytes[2] = 0x0C;
+    outframe.data.bytes[3] = highByte(tach_rpm_enc);
+    outframe.data.bytes[4] = lowByte(tach_rpm_enc);
+    Can1.sendFrame(outframe);
   }    
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
