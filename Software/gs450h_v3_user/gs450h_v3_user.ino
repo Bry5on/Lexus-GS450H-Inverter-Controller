@@ -854,7 +854,7 @@ void Frames10MS() //send this message out for the CAN based gauge interpreter
     outframe.id = 0x0AA;            // Set our transmission address ID
     outframe.length = 8;            // Data payload 8 bytes
     outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
-    outframe.rtr = 1;                 //No request
+    outframe.rtr = 0;                 // data frame (not a remote request)
     outframe.data.bytes[0] = map(torque, 0, 3500, 0, 100); // Torque percentage requested (1bit=1%)
     outframe.data.bytes[1] = vehicle_doublespeed; //Two times the car's ground speed in mph * 2
     outframe.data.bytes[2] = StatorCAN; //higher of both stator temps in C. Gauge range 80 - 150C
@@ -864,23 +864,26 @@ void Frames10MS() //send this message out for the CAN based gauge interpreter
     outframe.data.bytes[6] = (uint8_t) abs(Sensor.Amperes) / 2; //Measured current value in A/2
     outframe.data.bytes[7] = 0x00;
 
-    Can1.sendFrame(outframe); 
+    Can0.sendFrame(outframe);
+    Can1.sendFrame(outframe);
 
     outframe.id = 0x05C;            // Set our transmission address ID, OBD2 standard oil temp: https://en.wikipedia.org/wiki/OBD-II_PIDs
     outframe.length = 1;            // Data payload 1 byte
     outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
-    outframe.rtr = 1;                 //No request
+    outframe.rtr = 0;                 // data frame (not a remote request)
     outframe.data.bytes[0] = StatorCAN+40; //higher of both stator temps in C+40. Gauge range 80 - 150C
 
-    Can1.sendFrame(outframe); 
+    Can0.sendFrame(outframe);
+    Can1.sendFrame(outframe);
 
     outframe.id = 0x005;            // Set our transmission address ID, OBD2 standard coolant temp: https://en.wikipedia.org/wiki/OBD-II_PIDs
     outframe.length = 1;            // Data payload 1 byte
     outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
-    outframe.rtr = 1;                 //No request
+    outframe.rtr = 0;                 // data frame (not a remote request)
     outframe.data.bytes[0] = CoolantCAN+40; //higher of both stator temps in C+40. Gauge range 0 - 100C
 
-    Can1.sendFrame(outframe); 
+    Can0.sendFrame(outframe);
+    Can1.sendFrame(outframe);
   }    
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -899,12 +902,13 @@ digitalWrite(13,!digitalRead(13));//blink led every time we fire this interrrupt
         outframe.id = 0x1D2;            // current selected gear message
         outframe.length = 5;            // Data payload 5 bytes
         outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
-        outframe.rtr=1;                 //No request
+        outframe.rtr=0;                 // data frame
         outframe.data.bytes[0]=shiftPos;  //e1=P  78=D  d2=R  b4=N
         outframe.data.bytes[1]=0x0c;  
         outframe.data.bytes[2]=0x8f;
         outframe.data.bytes[3]=Gcount;
         outframe.data.bytes[4]=0xf0;
+        Can0.sendFrame(outframe);
         Can1.sendFrame(outframe);
         ///////////////////////////
         //Byte 3 is a counter running from 0D through to ED and then back to 0D///
