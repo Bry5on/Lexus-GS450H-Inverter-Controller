@@ -78,7 +78,7 @@ CAN_FRAME outframe;  //A structured variable according to due_can library for tr
 
 Metro timer_htm=Metro(10);
 Metro timer_Frames200 = Metro(200);
-Metro timer_Frames10 = Metro(10);
+Metro timer_Frames100 = Metro(100);
 
 byte mth_data[100];
 byte htm_data_setup[80]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,25,0,0,0,0,0,0,0,128,0,0,0,128,0,0,0,37,1};
@@ -843,9 +843,9 @@ float readThermistor(int adc)
 }
 ///////////////////////////////////////////////////////////////////////
 
-void Frames10MS() //send this message out for the CAN based gauge interpreter
+void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
 {
-  if(timer_Frames10.check())
+  if(timer_Frames100.check())
   {
     RPM=abs(mg1_speed) / 2.28; //output shaft rotational speed
     vehicle_doublespeed = abs(mg1_speed) / 52; //mg1_speed is 1.2*mg2_speed, mg2_speed is 1.9*output shaft speed, mg1=2.28*output shaft, 4000rpm output shaft is 88mph. mg1*.009649 = ground speed, 1/.009649 = 103.63 (~104)
@@ -960,7 +960,7 @@ Metro timer_diag = Metro(1100);
 void loop() {
 
   control_inverter();
-  Frames10MS();
+  Frames100MS();
   //Frames200MS();
 
   if(timer_diag.check())
