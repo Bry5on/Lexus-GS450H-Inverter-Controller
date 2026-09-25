@@ -90,6 +90,38 @@ level. `brakeOut`, `inverterPower`, `inverterRequest`, and `oilPumpPower` are
 outputs; `pb1`-`pb3`, `in1`, `in2`, and `low` are inputs. No web endpoint
 actuates hardware.
 
+### Controller thermistor models
+
+`Software/gs450h_v3_user/gs450h_v3_user.ino` uses separate provisional
+resistance/Beta profiles: MG1 and MG2 use 47 kOhm at 25 C, Beta 3500 K, and a
+33 kOhm pull-up; the oil-pump sensor uses a nominal 100 kOhm at 25 C, Beta
+3950 K, and 66 kOhm total pull-up; transmission uses 1.8 kOhm pull-up and a
+Beta 3500 K curve anchored to the measured 3.36 kOhm near 26 C (about
+3.49 kOhm at 25 C). The oil-pump profile is a provisional model, not a
+certified calibration; an ADC-count lookup for another board is not a
+transferable resistance curve. The measured resistances are initial reference
+points, not a full sensor calibration.
+At roughly 26 C, the measured resistances were 3.36 kOhm for transmission,
+95.7 kOhm for the oil pump, and 51 kOhm for each MG stator sensor.
+
+The existing `o`, `r`, `tt`, and `ot` telemetry keys and their numeric format
+remain unchanged. Invalid conversions use a finite `0.0` placeholder; an
+invalid MG conversion also asserts the existing warning output. The
+conversion rejects ADC endpoints and results outside -40 to 200 C before
+producing a finite number. The Due conversion retains this firmware's 3.3 V
+ADC / 10-bit count model and the divider's +5 V supply. The oil channel
+approaches ADC clipping around 20 C.
+The transmission curve reaches the 3.3 V limit at approximately 25 C, so its
+measured ambient point is close to full scale and cooler readings clip; the MG
+channels also have cold-end limits. Transmission temperature is an estimated
+display value only and is not used for thermal protection.
+
+All thermistor pull-ups remain connected to +5 V. An open sensor can therefore
+drive an ADC input toward +5 V, above the SAM3X's assumed 3.3 V ADC range.
+Firmware rejects saturated readings and substitutes a finite numeric
+placeholder, but cannot make that overvoltage electrically safe; appropriate
+hardware input protection or level shifting is still required.
+
 The live-gauge panel uses self-contained inline SVG (no chart library assets):
 pack voltage is scaled 0-430 V, absolute DC-current magnitude 0-550 A, power
 magnitude 0-300 kW, MG1/MG2 speed 0-10,000 rpm, and temperatures/PWM use the

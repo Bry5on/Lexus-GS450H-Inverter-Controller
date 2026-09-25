@@ -125,15 +125,37 @@ int readIndex = 0;              // the index of the current reading
 int total = 0;                  // the running total
 
 /////////////temp sensor data////////////////////
-float vcc = 5.0;
-float adc_step = 3.3/1023.0;
-float Rtop = 1800.0; //swap out a 20k resistor here to get more temp fidelity in lower ranges
-float Ro = 47000;
-float To = 25+273;
-float B = 3500;
+struct ThermistorProfile
+{
+  float resistanceAt25C;
+  float beta;
+  float pullupResistance;
+};
+
+bool readThermistor(int adc, float resistanceAt25C, float beta,
+                    float pullupResistance, float& celsius);
+bool invalidThermistorReading(float& celsius);
+
+const float thermistorDividerVoltage = 5.0f;
+const float thermistorAdcReferenceVoltage = 3.3f;
+const int thermistorAdcMax = 1023;
+const float kelvinAt25C = 298.15f;
+const float minimumThermistorCelsius = -40.0f;
+const float maximumThermistorCelsius = 200.0f;
+
+// Provisional resistance/Beta models; each channel has its own pull-up value.
+const ThermistorProfile mgThermistorProfile = {47000.0f, 3500.0f, 33000.0f};
+const ThermistorProfile oilPumpThermistorProfile = {100000.0f, 3950.0f, 66000.0f};
+// Anchored to 3.36 kOhm at about 26 C; this is an estimate, not a calibration.
+const ThermistorProfile transmissionThermistorProfile = {3495.0f, 3500.0f, 1800.0f};
+
+// The pull-ups remain tied to +5 V. An open sensor can drive the ADC input
+// toward +5 V; software clipping checks do not make that electrically safe.
 float mg1_stat=0;
 float mg2_stat=0;
 float high_stat=0;
+bool mg1_temp_valid=false;
+bool mg2_temp_valid=false;
 uint8_t StatorCAN=0;
 uint8_t CoolantCAN=0;
 
@@ -375,8 +397,18 @@ Serial2.print(";r="); Serial2.print(mg2_stat, 1);
 Serial2.print(";q="); Serial2.print(parameters.PumpPWM); // legacy field: oil-pump PWM command (%)
 Serial2.print(";iw="); Serial2.print(temp_inv_water);
 Serial2.print(";il="); Serial2.print(temp_inv_inductor);
-Serial2.print(";tt="); Serial2.print(readThermistor(analogRead(TransTemp)), 1);
-Serial2.print(";ot="); Serial2.print(readThermistor(analogRead(OilpumpTemp)), 1);
+float transmissionTemp = 0.0f;
+readThermistor(
+  analogRead(TransTemp), transmissionThermistorProfile.resistanceAt25C,
+  transmissionThermistorProfile.beta, transmissionThermistorProfile.pullupResistance,
+  transmissionTemp);
+Serial2.print(";tt="); Serial2.print(transmissionTemp, 1);
+float oilPumpTemp = 0.0f;
+readThermistor(
+  analogRead(OilpumpTemp), oilPumpThermistorProfile.resistanceAt25C,
+  oilPumpThermistorProfile.beta, oilPumpThermistorProfile.pullupResistance,
+  oilPumpTemp);
+Serial2.print(";ot="); Serial2.print(oilPumpTemp, 1);
 Serial2.print(";th="); Serial2.print(throttle_percent);
 Serial2.print(";brakeOut="); Serial2.print(digitalRead(Out1)); // Out1 brake-light output, not a pedal input
 Serial2.print(";gear="); Serial2.print(gear);
@@ -832,33 +864,70 @@ void changeGear()
 
 void processTemps()
 {
-  mg1_stat=readThermistor(analogRead(MG1Temp));
-  mg2_stat=readThermistor(analogRead(MG2Temp));
-  if(mg1_stat > 120 || mg2_stat > 120 || Sensor.Voltage < 286) digitalWrite(OilPumpPower,HIGH);  //turn on oil pressure light when battery voltage is below 286V (2.8V/cell) or either of motor temps are high. Max operable is 150C
+  mg1_temp_valid = readThermistor(
+    analogRead(MG1Temp), mgThermistorProfile.resistanceAt25C,
+    mgThermistorProfile.beta, mgThermistorProfile.pullupResistance, mg1_stat);
+  mg2_temp_valid = readThermistor(
+    analogRead(MG2Temp), mgThermistorProfile.resistanceAt25C,
+    mgThermistorProfile.beta, mgThermistorProfile.pullupResistance, mg2_stat);
+  if(!mg1_temp_valid || !mg2_temp_valid || mg1_stat > 120 || mg2_stat > 120 || Sensor.Voltage < 286)
+    digitalWrite(OilPumpPower,HIGH);  // signal high temperature, invalid stator input, or low battery
   else if (delayRunning && ((millis() - delayStart) <= 200)) digitalWrite(OilPumpPower, HIGH); // oil pressure light on during startup
   else 
   {
     delayRunning = false; // prevent delay code being run more then once
     digitalWrite(OilPumpPower,LOW);
   }
-  if(mg1_stat > mg2_stat) high_stat = mg1_stat; //set high stator temp for display via WiFi and gauge
-  else high_stat = mg2_stat;
+  if(mg1_temp_valid && (!mg2_temp_valid || mg1_stat > mg2_stat)) high_stat = mg1_stat;
+  else if(mg2_temp_valid) high_stat = mg2_stat;
+  else high_stat = 0.0f;
 }
 
 
-
 //////////////Dilbert's temp sensor routine////////////////////////////
-float readThermistor(int adc)
+bool readThermistor(int adc, float resistanceAt25C, float beta,
+                    float pullupResistance, float& celsius)
 {
-  float raw = (float)adc;
-  float voltage = raw*adc_step;
-  
-  float Rt = (voltage * Rtop)/(vcc-voltage); //Rtop = 1800, vcc = 5.0 - swap Rtop with 20k
-  
-  float temp = (1/(1.0/To + (1.0/B)*log(Rt/Ro)))-273; //Ro = 47k, B = 3500, To = 25+273 = 298
-  //
-  
-  return temp;
+  if(adc <= 0 || adc >= thermistorAdcMax ||
+     resistanceAt25C <= 0.0f || beta <= 0.0f || pullupResistance <= 0.0f)
+  {
+    return invalidThermistorReading(celsius);
+  }
+
+  float voltage = ((float)adc * thermistorAdcReferenceVoltage) / thermistorAdcMax;
+  float dividerRemainder = thermistorDividerVoltage - voltage;
+  if(voltage <= 0.0f || dividerRemainder <= 0.0f)
+  {
+    return invalidThermistorReading(celsius);
+  }
+
+  float sensorResistance = (voltage * pullupResistance) / dividerRemainder;
+  if(sensorResistance <= 0.0f)
+  {
+    return invalidThermistorReading(celsius);
+  }
+
+  float inverseKelvin = (1.0f / kelvinAt25C) +
+                        (log(sensorResistance / resistanceAt25C) / beta);
+  if(inverseKelvin <= 0.0f)
+  {
+    return invalidThermistorReading(celsius);
+  }
+
+  float convertedCelsius = (1.0f / inverseKelvin) - 273.15f;
+  if(convertedCelsius != convertedCelsius ||
+     convertedCelsius < minimumThermistorCelsius ||
+     convertedCelsius > maximumThermistorCelsius)
+    return invalidThermistorReading(celsius);
+
+  celsius = convertedCelsius;
+  return true;
+}
+
+bool invalidThermistorReading(float& celsius)
+{
+  celsius = 0.0f;
+  return false;
 }
 ///////////////////////////////////////////////////////////////////////
 
