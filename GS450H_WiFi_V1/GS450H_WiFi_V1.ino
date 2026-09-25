@@ -14,7 +14,8 @@ r=mg2 temp (-20 to 120C)
 q=oil-pump PWM command (0-100%, legacy field; not measured pressure)
 *=end of string
 xxx=three digit integer for each parameter eg p100 = 100kw.
-The current v3 user firmware sends approximately once per second.
+The current v3 user firmware sends approximately once per second. A frame is
+complete at '*'; trailing CR/LF is optional.
 
 Older vxxx,ixxx,pxxx,mxxxx,nxxxx,oxxx,rxxx,qxxx* records are still accepted.
 */
@@ -44,6 +45,7 @@ unsigned long lastFrameAt = 0;
 
 const char* otaHostname = "GS450H-Inverter";
 String serialFrame;
+bool discardSerialFrame = false;
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -72,6 +74,21 @@ String mg2Temp() {
 String oilPumpPwm() {
   return q;
 }
+
+String sanitizeAscii(String value) {
+  value.trim();
+  String sanitized;
+  sanitized.reserve(value.length());
+  for (unsigned int index = 0; index < value.length(); index++) {
+    uint8_t character = static_cast<uint8_t>(value.charAt(index));
+    if (character >= 32 && character <= 126) {
+      sanitized += static_cast<char>(character);
+    }
+  }
+  return sanitized;
+}
+
+String readConfigFile(const char* path);
 
 void setTelemetryField(const String& key, const String& value) {
   if (key == "v") v = value;
@@ -118,9 +135,10 @@ void parseFramedTelemetry(const String& frame) {
   }
 
   if (count == 0) return;
-  telemetryJson = "{\"ok\":true,\"ageMs\":0";
+  telemetryJson = "{\"ok\":true,\"protocol\":\"expanded\",\"expanded\":true,\"ageMs\":0";
   for (uint8_t index = 0; index < count; index++) {
-    bool numeric = fields[index] != "gear" && fields[index] != "gs";
+    bool numeric = fields[index] != "gear" && fields[index] != "gs" &&
+                   fields[index] != "protocol";
     telemetryJson += ",";
     addJsonField(telemetryJson, fields[index].c_str(), values[index], numeric);
   }
@@ -145,7 +163,7 @@ void parseLegacyTelemetry(const String& frame) {
   o = frame.substring(comma[4] + 2, comma[5]);
   r = frame.substring(comma[5] + 2, comma[6]);
   q = frame.substring(comma[6] + 2, frame.length() - 1);
-  telemetryJson = "{\"ok\":true,\"ageMs\":0";
+  telemetryJson = "{\"ok\":true,\"protocol\":\"legacy\",\"expanded\":false,\"ageMs\":0";
   telemetryJson += ",";
   addJsonField(telemetryJson, "v", v, true);
   telemetryJson += ",";
@@ -167,31 +185,19 @@ void parseLegacyTelemetry(const String& frame) {
 }
 
 String getBGcolor() {
-  File BGcolor = SPIFFS.open("/BGcolor.txt", "r");
-  String value = BGcolor.readString();
-  BGcolor.close();
-  return (value);
+  return readConfigFile("/BGcolor.txt");
 }
 
 String getHeading() {
-  File Heading = SPIFFS.open("/Heading.txt", "r");
-  String value = Heading.readString();
-  Heading.close();
-  return (value);
+  return readConfigFile("/Heading.txt");
 }
 
 String getSsid() {
-  File ssid = SPIFFS.open("/ssid.txt", "r");
-  String value = ssid.readString();
-  ssid.close();
-  return (value);
+  return readConfigFile("/ssid.txt");
 }
 
 String getPassword() {
-  File password = SPIFFS.open("/password.txt", "r");
-  String value = password.readString();
-  password.close();
-  return (value);
+  return readConfigFile("/password.txt");
 }
 
 bool writeSetting(const char* path, const String& value) {
@@ -201,8 +207,14 @@ bool writeSetting(const char* path, const String& value) {
     Serial.println(path);
     return false;
   }
-  setting.print(value);
+  String sanitized = sanitizeAscii(value);
+  size_t written = setting.print(sanitized);
   setting.close();
+  if (written != sanitized.length()) {
+    Serial.print("Incomplete write to ");
+    Serial.println(path);
+    return false;
+  }
   return true;
 }
 
@@ -221,8 +233,7 @@ String readConfigFile(const char* path) {
   if (!file) return "";
   String value = file.readString();
   file.close();
-  value.trim();
-  return value;
+  return sanitizeAscii(value);
 }
 
 void startNetwork() {
@@ -239,7 +250,7 @@ void startNetwork() {
 
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.mode(WIFI_AP);
-    WiFi.softAP("GS450H-Inverter", WIFI_AP_PASSWORD);
+    WiFi.softAP("GS450H-Inverter", GS450H_AP_PASSWORD);
     Serial.println("Wi-Fi STA unavailable; started fallback AP");
   } else {
     Serial.print("Wi-Fi STA connected: ");
@@ -247,7 +258,7 @@ void startNetwork() {
   }
 
   ArduinoOTA.setHostname(otaHostname);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.setPassword(GS450H_OTA_PASSWORD);
   ArduinoOTA.begin();
 }
 
@@ -266,10 +277,10 @@ void setup() {
 
   // Route for root / web pages
   server.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send(SPIFFS, "/index.html");
+    request->send(SPIFFS, "/index.html", "text/html; charset=utf-8");
   });
   server.on("/admin", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send(SPIFFS, "/admin.html");
+    request->send(SPIFFS, "/admin.html", "text/html; charset=utf-8");
   });
   server.on("/highcharts.js", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send(SPIFFS, "/highcharts.js", "text/javascript");
@@ -281,31 +292,31 @@ void setup() {
     request->send(SPIFFS, "/solid-gauge.js", "text/javascript");
   });
   server.on("/PackVoltage", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", PackVoltage().c_str());
+    request->send(200, "text/plain", PackVoltage());
   });
   server.on("/Current", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", Current().c_str());
+    request->send(200, "text/plain", Current());
   });
     server.on("/Power", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", Power().c_str());
+    request->send(200, "text/plain", Power());
   });
   server.on("/mg1RPM", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", mg1RPM().c_str());
+    request->send(200, "text/plain", mg1RPM());
   });
   server.on("/mg2RPM", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", mg2RPM().c_str());
+    request->send(200, "text/plain", mg2RPM());
   });
   server.on("/mg1Temp", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", mg1Temp().c_str());
+    request->send(200, "text/plain", mg1Temp());
   });
   server.on("/mg2Temp", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", mg2Temp().c_str());
+    request->send(200, "text/plain", mg2Temp());
   });
   server.on("/oilPressure", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", oilPumpPwm().c_str());
+    request->send(200, "text/plain", oilPumpPwm());
   });
   server.on("/oilPumpPwm", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", oilPumpPwm().c_str());
+    request->send(200, "text/plain", oilPumpPwm());
   });
   server.on("/telemetry", HTTP_GET, [](AsyncWebServerRequest * request) {
     String response = telemetryJson;
@@ -315,37 +326,42 @@ void setup() {
     request->send(200, "application/json", response);
   });
   server.on("/getBGcolor", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", getBGcolor().c_str());
+    request->send(200, "text/plain", getBGcolor());
   });
   server.on("/getSsid", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", getSsid().c_str());
+    request->send(200, "text/plain", getSsid());
   });
   server.on("/getPassword", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", getPassword().c_str());
+    request->send(200, "text/plain", getPassword());
   });
   server.on("/getStationSsid", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", readConfigFile("/ssid.txt").c_str());
+    request->send(200, "text/plain", readConfigFile("/ssid.txt"));
   });
   server.on("/getStationPassword", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", readConfigFile("/password.txt").c_str());
+    request->send(200, "text/plain", readConfigFile("/password.txt"));
   });
   server.on("/getHeading", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", getHeading().c_str());
+    request->send(200, "text/plain", getHeading());
   });
   server.on("/setBGcolor", HTTP_ANY, [](AsyncWebServerRequest * request) {
+    bool writeOk = true;
     if (requestHasValue(request, "favcolor"))
-      writeSetting("/BGcolor.txt", requestValue(request, "favcolor"));
+      writeOk = writeSetting("/BGcolor.txt", requestValue(request, "favcolor")) && writeOk;
     if (requestHasValue(request, "heading"))
-      writeSetting("/Heading.txt", requestValue(request, "heading"));
+      writeOk = writeSetting("/Heading.txt", requestValue(request, "heading")) && writeOk;
     if (requestHasValue(request, "ssid"))
-      writeSetting("/ssid.txt", requestValue(request, "ssid"));
+      writeOk = writeSetting("/ssid.txt", requestValue(request, "ssid")) && writeOk;
     if (requestHasValue(request, "password"))
-      writeSetting("/password.txt", requestValue(request, "password"));
+      writeOk = writeSetting("/password.txt", requestValue(request, "password")) && writeOk;
     // The deployed layout uses these same files for station credentials.
     if (requestHasValue(request, "stationSsid"))
-      writeSetting("/ssid.txt", requestValue(request, "stationSsid"));
+      writeOk = writeSetting("/ssid.txt", requestValue(request, "stationSsid")) && writeOk;
     if (requestHasValue(request, "stationPassword"))
-      writeSetting("/password.txt", requestValue(request, "stationPassword"));
+      writeOk = writeSetting("/password.txt", requestValue(request, "stationPassword")) && writeOk;
+    if (!writeOk) {
+      request->send(500, "text/plain; charset=utf-8", "Unable to save one or more settings");
+      return;
+    }
     request->redirect("/");
   });
 
@@ -356,15 +372,32 @@ void loop() {
   ArduinoOTA.handle();
   while (Serial.available() > 0) {
     char incoming = static_cast<char>(Serial.read());
-    if (incoming == '\n' || incoming == '\r') {
-      serialFrame.trim();
-      if (serialFrame.startsWith("@")) parseFramedTelemetry(serialFrame);
-      else if (serialFrame.startsWith("v")) parseLegacyTelemetry(serialFrame);
+    if (discardSerialFrame) {
+      if (incoming == '*' || incoming == '@') {
+        discardSerialFrame = false;
+        serialFrame = incoming == '@' ? "@" : "";
+      }
+      continue;
+    }
+
+    if (incoming == '*') {
+      if (serialFrame.length() > 0) {
+        serialFrame += incoming;
+        if (serialFrame.startsWith("@")) parseFramedTelemetry(serialFrame);
+        else if (serialFrame.startsWith("v")) parseLegacyTelemetry(serialFrame);
+      }
       serialFrame = "";
+    } else if (incoming == '\n' || incoming == '\r') {
+      serialFrame = "";
+    } else if (serialFrame.length() == 0) {
+      if (incoming == '@' || incoming == 'v') serialFrame += incoming;
+    } else if (incoming == '@') {
+      serialFrame = "@";
     } else if (serialFrame.length() < 512) {
       serialFrame += incoming;
     } else {
       serialFrame = "";
+      discardSerialFrame = true;
     }
   }
 }

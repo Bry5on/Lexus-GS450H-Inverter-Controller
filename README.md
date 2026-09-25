@@ -38,24 +38,41 @@ https://openinverter.org/wiki/Lexus_GS450h_Inverter
 
 ## Wi-Fi telemetry
 
-The active Wi-Fi integration is `Software/gs450h_v3_user/gs450h_v3_user.ino` together
-with `WiFi/GS450H_WiFi_V1.ino` and the files in `WiFi/Data`. The controller sends
-one newline-terminated framed record approximately once per second over Serial2:
+The active Wi-Fi receiver is `GS450H_WiFi_V1/GS450H_WiFi_V1.ino`, using the
+files in `GS450H_WiFi_V1/Data`. Frames are complete at the `*` terminator;
+CR/LF after it is optional. Both the current `@key=value;...*` format and the
+original `v...,i...,p...,m...,n...,o...,r...,q...*` format are accepted.
+Consequently the existing main-controller firmware does not need an update
+for the basic legacy voltage/current/power/speed/temperature/PWM gauges.
+Additional expanded diagnostics require the controller firmware to transmit
+the corresponding newer fields. The current updated controller sends its
+expanded record approximately once per second over Serial2:
+
+The `/telemetry` JSON response includes `protocol` and `expanded` metadata.
+Legacy frames map `o` to the higher stator temperature and `r` to inverter
+water temperature. Diagnostics absent from legacy frames are shown as
+“Not sent by legacy firmware” (or omitted where a separate expanded-only row
+is used), never interpreted as OFF, INVALID, or an unknown gear.
 
 ### Wi-Fi sketch setup
 
 The Wi-Fi sketch supports ESP32 and ESP8266 builds. For ESP8266, LittleFS is
 aliased to the existing `SPIFFS` name so the deployed route and file layout
-remain compatible. Copy `WiFi/secrets.example.h` to `WiFi/secrets.h` and set
-local values for `WIFI_AP_PASSWORD` and `OTA_PASSWORD`; the real file is
-ignored by Git and must not be committed. Upload the contents of `WiFi/Data`
-to the board filesystem.
+remain compatible. Copy `GS450H_WiFi_V1/secrets.example.h` to
+`GS450H_WiFi_V1/secrets.h` and set local values for `GS450H_AP_PASSWORD` and
+`GS450H_OTA_PASSWORD`; any file named `secrets.h` is ignored by Git and must
+not be committed. Upload the contents of `GS450H_WiFi_V1/Data` to the board
+filesystem.
+Settings loaded from or saved to the filesystem are trimmed and filtered to
+printable ASCII, matching the deployed sketch behavior. Non-ASCII SSIDs and
+passwords are therefore not supported; failed filesystem writes are logged and
+returned as an HTTP error rather than silently redirecting.
 
 At boot, `/ssid.txt` and `/password.txt` are read from the filesystem and used
 for station mode. If either is missing or the station does not connect within
 10 seconds, the sketch starts the `GS450H-Inverter` fallback access point using
-`WIFI_AP_PASSWORD`. ArduinoOTA uses hostname `GS450H-Inverter` and
-`OTA_PASSWORD`. The existing `/admin`, `/setBGcolor`, `/getSsid`,
+`GS450H_AP_PASSWORD`. ArduinoOTA uses hostname `GS450H-Inverter` and
+`GS450H_OTA_PASSWORD`. The existing `/admin`, `/setBGcolor`, `/getSsid`,
 `/getPassword`, and legacy scalar telemetry routes remain available.
 
 ```text
@@ -73,7 +90,16 @@ level. `brakeOut`, `inverterPower`, `inverterRequest`, and `oilPumpPower` are
 outputs; `pb1`-`pb3`, `in1`, `in2`, and `low` are inputs. No web endpoint
 actuates hardware.
 
-The electrical-card bars are display scales only: HV bus is shown on a
-0-430 V scale and absolute DC-current magnitude on a 0-550 A scale. The numeric
-readings remain unmodified and visible if they exceed those visual ranges; an
-over-range bar fills and changes color. These values are not firmware limits.
+The live-gauge panel uses self-contained inline SVG (no chart library assets):
+pack voltage is scaled 0-430 V, absolute DC-current magnitude 0-550 A, power
+magnitude 0-300 kW, MG1/MG2 speed 0-10,000 rpm, and temperatures/PWM use the
+ranges shown on each gauge. Gauge arcs clamp at their display range and change
+color when over-range, while the raw readings remain visible in the gauge and
+diagnostic cards. These visual ranges are not firmware limits.
+
+The active `GS450H_WiFi_V1/data` filesystem payload currently totals 21,185
+unpacked bytes (including the directory's `.DS_Store`) against the 45,056-byte
+LittleFS partition. No `mklittlefs`/`mkspiffs` packer is installed here, so this
+is a source-file size check rather than a verified packed-image measurement.
+Do not upload `data.bak` or restore the legacy Highcharts files: they exceed
+the partition budget.
