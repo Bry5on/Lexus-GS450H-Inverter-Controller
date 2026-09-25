@@ -17,6 +17,11 @@
     .metric { display:flex; justify-content:space-between; align-items:baseline; border-top:1px solid #374151; padding:8px 0 0; margin-top:8px; }
     .metric:first-of-type { border-top:0; margin-top:0; } .label { color:var(--muted); }
     .value { font-size:1.15rem; font-variant-numeric:tabular-nums; } .unit { color:var(--muted); font-size:.8rem; margin-left:4px; }
+    .scale { margin-top:7px; }
+    .scale-label { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:.72rem; }
+    .scale-track { height:7px; margin-top:4px; overflow:hidden; border-radius:99px; background:#374151; }
+    .scale-fill { display:block; width:0; height:100%; border-radius:inherit; background:var(--good); transition:width .2s ease; }
+    .scale-fill.over { background:var(--warn); }
     .badge { border-radius:999px; padding:3px 9px; font-size:.8rem; background:#374151; }
     .on { color:var(--good); } .off { color:var(--muted); } .fault { color:var(--bad); }
     .note { max-width:1000px; margin:14px auto 0; color:var(--muted); font-size:.78rem; }
@@ -27,7 +32,15 @@
   <main>
     <section><h2>Electrical</h2>
       <div class="metric"><span class="label">HV bus</span><span><b data-k="v">-</b><span class="unit">V</span></span></div>
+      <div class="scale" aria-label="HV bus display scale from 0 to 430 volts">
+        <div class="scale-label"><span>Display scale</span><span>0-430 V</span></div>
+        <div id="voltageScaleTrack" class="scale-track" role="meter" aria-label="HV bus display scale" aria-valuemin="0" aria-valuemax="430" aria-valuenow="0"><span id="voltageScale" class="scale-fill"></span></div>
+      </div>
       <div class="metric"><span class="label">DC current</span><span><b data-k="i">-</b><span class="unit">A</span></span></div>
+      <div class="scale" aria-label="Absolute DC current display scale from 0 to 550 amperes">
+        <div class="scale-label"><span>Magnitude display scale</span><span>0-550 A</span></div>
+        <div id="currentScaleTrack" class="scale-track" role="meter" aria-label="Absolute DC current display scale" aria-valuemin="0" aria-valuemax="550" aria-valuenow="0"><span id="currentScale" class="scale-fill"></span></div>
+      </div>
       <div class="metric"><span class="label">Power</span><span><b data-k="p">-</b><span class="unit">kW</span></span></div>
     </section>
     <section><h2>Motor speeds and temperatures</h2>
@@ -61,9 +74,29 @@
   const keys = ['v','i','p','m','n','o','r','iw','il','tt','ot','q','th'];
   const text = (value, digits=1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '-';
   const state = (value, on='ON', off='OFF') => Number(value) ? `<span class="on">${on}</span>` : `<span class="off">${off}</span>`;
+  function updateScale(id, trackId, value, max, unit, magnitude=false) {
+    const fill = document.getElementById(id);
+    const track = document.getElementById(trackId);
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      fill.style.width = '0%';
+      fill.classList.remove('over');
+      track.setAttribute('aria-valuenow', '0');
+      track.setAttribute('aria-valuetext', 'No reading');
+      return;
+    }
+    const scaledValue = magnitude ? Math.abs(numeric) : Math.max(0, numeric);
+    const displayValue = Math.min(scaledValue, max);
+    fill.style.width = `${displayValue / max * 100}%`;
+    fill.classList.toggle('over', scaledValue > max);
+    track.setAttribute('aria-valuenow', String(displayValue));
+    track.setAttribute('aria-valuetext', `${scaledValue}${unit}${scaledValue > max ? ', above display scale' : ''}`);
+  }
   function render(data) {
     if (!data || data.ok !== true) throw new Error('invalid frame');
     keys.forEach(k => { const node=document.querySelector(`[data-k="${k}"]`); if (node) node.textContent=text(data[k]); });
+    updateScale('voltageScale', 'voltageScaleTrack', data.v, 430, ' V');
+    updateScale('currentScale', 'currentScaleTrack', data.i, 550, ' A', true);
     document.getElementById('gear').textContent = labels[data.gear] || 'Unknown';
     document.getElementById('selector').textContent = `IN1 ${data.in1?'HIGH':'LOW'} / IN2 ${data.in2?'HIGH':'LOW'} / LOW ${data.low?'HIGH':'LOW'}`;
     document.getElementById('brakeOut').innerHTML = state(data.brakeOut, 'ON', 'OFF');

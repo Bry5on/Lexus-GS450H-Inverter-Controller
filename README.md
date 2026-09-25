@@ -72,3 +72,8 @@ are percentages, and `0`/`1` state fields represent the observed hardware pin
 level. `brakeOut`, `inverterPower`, `inverterRequest`, and `oilPumpPower` are
 outputs; `pb1`-`pb3`, `in1`, `in2`, and `low` are inputs. No web endpoint
 actuates hardware.
+
+The electrical-card bars are display scales only: HV bus is shown on a
+0-430 V scale and absolute DC-current magnitude on a 0-550 A scale. The numeric
+readings remain unmodified and visible if they exceed those visual ranges; an
+over-range bar fills and changes color. These values are not firmware limits.
