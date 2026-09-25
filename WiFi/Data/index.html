@@ -1,522 +1,88 @@
-<!DOCTYPE HTML><html>
+<!doctype html>
+<html lang="en">
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script src="highcharts.js"></script>
-  <script src="highcharts-more.js"></script>
-  <script src="solid-gauge.js"></script>
+  <meta charset="utf-8">
+  <title>GS450H telemetry</title>
   <style>
-  
-  
-  .highcharts-figure .chart-container {
-	width: 300px;
-	height: 200px;
-	float: left;
-}
-
-.highcharts-figure, .highcharts-data-table table {
-	width: 1200px;
-	margin: 0 auto;
-}
-
-.highcharts-data-table table {
-    font-family: Verdana, sans-serif;
-    border-collapse: collapse;
-    border: 1px solid #EBEBEB;
-    margin: 10px auto;
-    text-align: center;
-    width: 100%;
-    max-width: 500px;
-}
-.highcharts-data-table caption {
-    padding: 1em 0;
-    font-size: 1.2em;
-    color: #555;
-}
-.highcharts-data-table th {
-	font-weight: 600;
-    padding: 0.5em;
-}
-.highcharts-data-table td, .highcharts-data-table th, .highcharts-data-table caption {
-    padding: 0.5em;
-}
-.highcharts-data-table thead tr, .highcharts-data-table tr:nth-child(even) {
-    background: #f8f8f8;
-}
-.highcharts-data-table tr:hover {
-    background: #f1f7ff;
-}
-
-@media (max-width: 600px) {
-	.highcharts-figure, .highcharts-data-table table {
-		width: 100%;
-	}
-	.highcharts-figure .chart-container {
-		width: 300px;
-		float: none;
-		margin: 0 auto;
-	}
-
-}
-  
-  
-  
-  
- 
+    :root { color-scheme: dark; --bg:#111827; --card:#1f2937; --muted:#9ca3af; --good:#34d399; --warn:#fbbf24; --bad:#f87171; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:16px; background:var(--bg); color:#f9fafb; font:16px system-ui,sans-serif; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:0 auto 16px; max-width:1000px; }
+    h1 { font-size:1.35rem; margin:0; } h2 { font-size:1rem; margin:0 0 12px; color:#d1d5db; }
+    #connection { color:var(--muted); font-size:.85rem; text-align:right; }
+    #connection.good { color:var(--good); } #connection.bad { color:var(--bad); }
+    main { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px; max-width:1000px; margin:auto; }
+    section { background:var(--card); border-radius:12px; padding:14px; box-shadow:0 2px 8px #0003; }
+    .metric { display:flex; justify-content:space-between; align-items:baseline; border-top:1px solid #374151; padding:8px 0 0; margin-top:8px; }
+    .metric:first-of-type { border-top:0; margin-top:0; } .label { color:var(--muted); }
+    .value { font-size:1.15rem; font-variant-numeric:tabular-nums; } .unit { color:var(--muted); font-size:.8rem; margin-left:4px; }
+    .badge { border-radius:999px; padding:3px 9px; font-size:.8rem; background:#374151; }
+    .on { color:var(--good); } .off { color:var(--muted); } .fault { color:var(--bad); }
+    .note { max-width:1000px; margin:14px auto 0; color:var(--muted); font-size:.78rem; }
   </style>
 </head>
 <body>
-  <h2></h2>
-  <figure class="highcharts-figure">
-  <div align="center"><h1><span id="heading1"></span></h1></div>
-  <div id="container-PackVoltage" class="chart-container"></div>
-  <div id="container-Current" class="chart-container"></div>
-  <div id="container-Power" class="chart-container"></div>
-  <div id="container-mg1RPM" class="chart-container"></div>
-  <div id="container-mg2RPM" class="chart-container"></div>
-  <div id="container-mg1Temp" class="chart-container"></div>
-  <div id="container-mg2Temp" class="chart-container"></div>
-  <div id="container-oilPressure" class="chart-container"></div>
-  </figure>
-</body>
-
-
+  <header><h1 id="heading1">GS450H inverter telemetry</h1><div id="connection">Waiting for data...</div></header>
+  <main>
+    <section><h2>Electrical</h2>
+      <div class="metric"><span class="label">HV bus</span><span><b data-k="v">-</b><span class="unit">V</span></span></div>
+      <div class="metric"><span class="label">DC current</span><span><b data-k="i">-</b><span class="unit">A</span></span></div>
+      <div class="metric"><span class="label">Power</span><span><b data-k="p">-</b><span class="unit">kW</span></span></div>
+    </section>
+    <section><h2>Motor speeds and temperatures</h2>
+      <div class="metric"><span class="label">MG1 speed</span><span><b data-k="m">-</b><span class="unit">rpm</span></span></div>
+      <div class="metric"><span class="label">MG2 speed</span><span><b data-k="n">-</b><span class="unit">rpm</span></span></div>
+      <div class="metric"><span class="label">MG1 stator</span><span><b data-k="o">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">MG2 stator</span><span><b data-k="r">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Inverter water</span><span><b data-k="iw">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Inverter inductor</span><span><b data-k="il">-</b><span class="unit">&deg;C</span></span></div>
+    </section>
+    <section><h2>Transmission and inputs</h2>
+      <div class="metric"><span class="label">Gear</span><span class="value" id="gear">-</span></div>
+      <div class="metric"><span class="label">Selector inputs</span><span class="value" id="selector">-</span></div>
+      <div class="metric"><span class="label">Transmission temp</span><span><b data-k="tt">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Oil-pump temp</span><span><b data-k="ot">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Oil-pump PWM command</span><span><b data-k="q">-</b><span class="unit">%</span></span></div>
+      <div class="metric"><span class="label">Throttle / brake-light output</span><span><b data-k="th">-</b><span class="unit">% / </span><span id="brakeOut">-</span></span></div>
+    </section>
+    <section><h2>Outputs and status</h2>
+      <div class="metric"><span class="label">Trans SL1 / SL2 / SP</span><span id="solenoids">-</span></div>
+      <div class="metric"><span class="label">Trans PB1 / PB2 / PB3 inputs</span><span id="transInputs">-</span></div>
+      <div class="metric"><span class="label">Inverter power / request outputs</span><span id="inverter">-</span></div>
+      <div class="metric"><span class="label">Oil-pump power output</span><span id="oilPower">-</span></div>
+      <div class="metric"><span class="label">Inverter data</span><span id="dataStatus">-</span></div>
+      <div class="metric"><span class="label">Startup status</span><span><span id="invStatus" class="badge">-</span></span></div>
+    </section>
+  </main>
+  <p class="note">Read-only display. Values are marked stale when a complete telemetry frame has not arrived recently.</p>
 <script>
-setInterval(function ( ) {
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (PackVoltage) {
-			point = PackVoltage.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/PackVoltage", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (Current) {
-			point = Current.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/Current", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (Power) {
-			point = Power.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/Power", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (mg1RPM) {
-			point = mg1RPM.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/mg1RPM", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (mg2RPM) {
-			point = mg2RPM.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/mg2RPM", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (mg1Temp) {
-			point = mg1Temp.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/mg1Temp", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (mg2Temp) {
-			point = mg2Temp.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/mg2Temp", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	    var point,
-        newVal,
-        inc;
-		if (oilPressure) {
-			point = oilPressure.series[0].points[0];
-			inc = parseFloat(this.responseText);
-			newVal =  inc;
-			point.update(newVal);
-		} 
-    }
-  };
-  xhttp.open("GET", "/oilPressure", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-     if (this.readyState == 4 && this.status == 200) {	
-		document.body.style.backgroundColor = (this.responseText);
-    }
-  };
-  xhttp.open("GET", "/getBGcolor", true);
-  xhttp.send();
-  
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-	  document.getElementById("heading1").innerHTML = this.responseText; //print to the web ui
-    }
-  };
-  xhttp.open("GET", "getHeading", true);	//action url of server
-  xhttp.send();
-}, 1000 ) ;
-
-var gaugeOptions = {
-    chart: {
-        type: 'solidgauge',
-		backgroundColor: 'rgba(0,0,0,0)'
-    },
-    title: null,
-    pane: {
-        center: ['50%', '85%'],
-        size: '140%',
-        startAngle: -90,
-        endAngle: 90,
-        background: {
-            backgroundColor:
-                Highcharts.defaultOptions.legend.backgroundColor || '#EEE',
-            innerRadius: '60%',
-            outerRadius: '100%',
-            shape: 'arc'
-        }
-    },
-    exporting: {
-        enabled: false
-    },
-    tooltip: {
-        enabled: false
-    },
-    // the value axis
-    yAxis: {
-        stops: [
-            [0.1, '#55BF3B'], // green
-            [0.5, '#DDDF0D'], // yellow
-            [0.9, '#DF5353']  // red
-        ],
-        lineWidth: 0,
-        tickWidth: 0,
-        minorTickInterval: null,
-        tickAmount: 2,
-        title: {
-            y: -70
-        },
-        labels: {
-            y: 16
-        }
-    },
-    plotOptions: {
-        solidgauge: {
-            dataLabels: {
-                y: 5,
-                borderWidth: 0,
-                useHTML: true
-            }
-        }
-    }
-};
-
-//Pack Voltage
-var PackVoltage = Highcharts.chart('container-PackVoltage', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: 0,
-        max: 700,
-        title: {
-            text: 'Pack Voltage'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'Pack Voltage',
-        data: [630],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">Volts</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' Volts'
-        }
-    }]
-}));
-
-//Current
-var Current = Highcharts.chart('container-Current', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: 0,
-        max: 1000,
-        title: {
-            text: 'Current'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'Current',
-        data: [900],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">Amps</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' Amps'
-        }
-    }]
-}));
-
-//Power
-var Power = Highcharts.chart('container-Power', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: 0,
-        max: 300,
-        title: {
-            text: 'Power'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'Power',
-        data: [270],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">kw</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' kw'
-        }
-    }]
-}));
-
-//MG1 RPM
-var mg1RPM = Highcharts.chart('container-mg1RPM', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: 0,
-        max: 10000,
-        title: {
-            text: 'MG1 RPM'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'MG1 RPM',
-        data: [9000],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">RPM</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' RPM'
-        }
-    }]
-}));
-
-//MG2 RPM
-var mg2RPM = Highcharts.chart('container-mg2RPM', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: 0,
-        max: 10000,
-        title: {
-            text: 'MG2 RPM'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'MG2 RPM',
-        data: [9000],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">RPM</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' RPM'
-        }
-    }]
-}));
-
-//MG1 Temperature
-var mg1Temp = Highcharts.chart('container-mg1Temp', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: -20,
-        max: 120,
-        title: {
-            text: 'MG1 Temperature'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'MG1 Temperature',
-        data: [100],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">&#8451</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' &#8451'
-        }
-    }]
-}));
-
-//MG2 Temperature
-var mg2Temp = Highcharts.chart('container-mg2Temp', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: -20,
-        max: 120,
-        title: {
-            text: 'MG2 Temperature'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'MG2 Temperature',
-        data: [100],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">&#8451</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' &#8451'
-        }
-    }]
-}));
-
-//Oil Pressure
-var oilPressure = Highcharts.chart('container-oilPressure', Highcharts.merge(gaugeOptions, {
-    yAxis: {
-        min: 0,
-        max: 100,
-        title: {
-            text: 'Oil Pressure'
-        }
-    },
-    credits: {
-        enabled: false
-    },
-    series: [{
-        name: 'Oil Pressure',
-        data: [90],
-        dataLabels: {
-            format:
-                '<div style="text-align:center">' +
-                '<span style="font-size:25px">{y}</span><br/>' +
-                '<span style="font-size:12px;opacity:0.4">%;</span>' +
-                '</div>'
-        },
-        tooltip: {
-            valueSuffix: ' %'
-        }
-    }]
-}));
-
-window.onload = function() {
-
-};
+  const labels = {0:'Park',1:'Reverse',2:'Neutral',3:'Drive'};
+  const keys = ['v','i','p','m','n','o','r','iw','il','tt','ot','q','th'];
+  const text = (value, digits=1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '-';
+  const state = (value, on='ON', off='OFF') => Number(value) ? `<span class="on">${on}</span>` : `<span class="off">${off}</span>`;
+  function render(data) {
+    if (!data || data.ok !== true) throw new Error('invalid frame');
+    keys.forEach(k => { const node=document.querySelector(`[data-k="${k}"]`); if (node) node.textContent=text(data[k]); });
+    document.getElementById('gear').textContent = labels[data.gear] || 'Unknown';
+    document.getElementById('selector').textContent = `IN1 ${data.in1?'HIGH':'LOW'} / IN2 ${data.in2?'HIGH':'LOW'} / LOW ${data.low?'HIGH':'LOW'}`;
+    document.getElementById('brakeOut').innerHTML = state(data.brakeOut, 'ON', 'OFF');
+    document.getElementById('solenoids').innerHTML = `${state(data.sl1)} / ${state(data.sl2)} / ${state(data.sp)}`;
+    document.getElementById('transInputs').innerHTML = `${state(data.pb1)} / ${state(data.pb2)} / ${state(data.pb3)}`;
+    document.getElementById('inverter').innerHTML = `${state(data.inverterPower)} / ${state(data.inverterRequest)}`;
+    document.getElementById('oilPower').innerHTML = state(data.oilPumpPower);
+    document.getElementById('dataStatus').innerHTML = Number(data.md) ? '<span class="on">VALID</span>' : '<span class="fault">INVALID</span>';
+    document.getElementById('invStatus').textContent = data.is === undefined ? '-' : `code ${data.is}`;
+    const age = Number(data.ageMs);
+    const connection = document.getElementById('connection');
+    if (!Number.isFinite(age) || age > 3000) { connection.textContent='Stale data'; connection.className='bad'; }
+    else { connection.textContent=`Live - ${age} ms`; connection.className='good'; }
+  }
+  async function poll() {
+    try { const response=await fetch('/telemetry', {cache:'no-store'}); if (!response.ok) throw new Error('HTTP '+response.status); render(await response.json()); }
+    catch (error) { const node=document.getElementById('connection'); node.textContent='No valid telemetry'; node.className='bad'; }
+  }
+  poll(); setInterval(poll, 1000);
 </script>
+</body>
 </html>

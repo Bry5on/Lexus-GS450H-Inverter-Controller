@@ -1,6 +1,8 @@
 /*
-The information will be provided over serial to the esp8266 at 19200 baud 8n1 in the form :
-vxxx,ixxx,pxxx,mxxxx,nxxxx,oxxx,rxxx,qxxx* where :
+The controller sends a framed telemetry record over serial at 19200 baud 8n1:
+@v=630;i=12.4;p=7.8;m=1200;n=2400;o=42.1;r=44.0;q=50;...*
+
+The first eight keys are the original Wi-Fi protocol:
 
 v=pack voltage (0-700Volts)
 i=current (0-1000Amps)
@@ -9,36 +11,39 @@ m=mg1 rpm (0-10000rpm)
 n=mg2 rpm (0-10000rpm)
 o=mg1 temp (-20 to 120C)
 r=mg2 temp (-20 to 120C)
-q=oil pressure (0-100%)
+q=oil-pump PWM command (0-100%, legacy field; not measured pressure)
 *=end of string
 xxx=three digit integer for each parameter eg p100 = 100kw.
-updates will be every 100ms approx.
+The current v3 user firmware sends approximately once per second.
 
-v100,i200,p35,m3000,n4000,o20,r100,q50*
-
+Older vxxx,ixxx,pxxx,mxxxx,nxxxx,oxxx,rxxx,qxxx* records are still accepted.
 */
 
 // Import required libraries
 #ifdef ESP32
 #include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <ESPAsyncWebServer.h>
 #include <SPIFFS.h>
 #else
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <ArduinoOTA.h>
 #include <Hash.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <FS.h>
+#include <LittleFS.h>
+#define SPIFFS LittleFS
 #endif
 #include <Wire.h>
+#include "secrets.h"
 
-// declaration of a variable
 String v, i, p, m, n, o, r, q;
+String telemetryJson = "{\"ok\":false}";
+unsigned long lastFrameAt = 0;
 
-// Replace with your network credentials
-const char* ssid = "";
-const char* password = "";
+const char* otaHostname = "GS450H-Inverter";
+String serialFrame;
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -64,8 +69,101 @@ String mg1Temp() {
 String mg2Temp() {
   return r;
 }
-String oilPressure() {
+String oilPumpPwm() {
   return q;
+}
+
+void setTelemetryField(const String& key, const String& value) {
+  if (key == "v") v = value;
+  else if (key == "i") i = value;
+  else if (key == "p") p = value;
+  else if (key == "m") m = value;
+  else if (key == "n") n = value;
+  else if (key == "o") o = value;
+  else if (key == "r") r = value;
+  else if (key == "q") q = value;
+}
+
+void addJsonField(String& json, const char* key, const String& value, bool numeric) {
+  json += "\"";
+  json += key;
+  json += "\":";
+  if (numeric && value.length() > 0) json += value;
+  else {
+    json += "\"";
+    json += value;
+    json += "\"";
+  }
+}
+
+void parseFramedTelemetry(const String& frame) {
+  if (frame.length() < 4 || frame.charAt(0) != '@' ||
+      frame.charAt(frame.length() - 1) != '*') return;
+
+  String fields[32];
+  String values[32];
+  uint8_t count = 0;
+  int start = 1;
+  while (start < frame.length() - 1 && count < 32) {
+    int end = frame.indexOf(';', start);
+    if (end < 0 || end > frame.length() - 1) end = frame.length() - 1;
+    int equals = frame.indexOf('=', start);
+    if (equals > start && equals < end) {
+      fields[count] = frame.substring(start, equals);
+      values[count] = frame.substring(equals + 1, end);
+      setTelemetryField(fields[count], values[count]);
+      count++;
+    }
+    start = end + 1;
+  }
+
+  if (count == 0) return;
+  telemetryJson = "{\"ok\":true,\"ageMs\":0";
+  for (uint8_t index = 0; index < count; index++) {
+    bool numeric = fields[index] != "gear" && fields[index] != "gs";
+    telemetryJson += ",";
+    addJsonField(telemetryJson, fields[index].c_str(), values[index], numeric);
+  }
+  telemetryJson += "}";
+  lastFrameAt = millis();
+}
+
+void parseLegacyTelemetry(const String& frame) {
+  int comma[7];
+  int start = 0;
+  for (uint8_t index = 0; index < 7; index++) {
+    comma[index] = frame.indexOf(',', start);
+    if (comma[index] < 0) return;
+    start = comma[index] + 1;
+  }
+  if (frame.charAt(0) != 'v' || frame.charAt(frame.length() - 1) != '*') return;
+  v = frame.substring(1, comma[0]);
+  i = frame.substring(comma[0] + 2, comma[1]);
+  p = frame.substring(comma[1] + 2, comma[2]);
+  m = frame.substring(comma[2] + 2, comma[3]);
+  n = frame.substring(comma[3] + 2, comma[4]);
+  o = frame.substring(comma[4] + 2, comma[5]);
+  r = frame.substring(comma[5] + 2, comma[6]);
+  q = frame.substring(comma[6] + 2, frame.length() - 1);
+  telemetryJson = "{\"ok\":true,\"ageMs\":0";
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "v", v, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "i", i, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "p", p, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "m", m, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "n", n, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "o", o, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "r", r, true);
+  telemetryJson += ",";
+  addJsonField(telemetryJson, "q", q, true);
+  telemetryJson += "}";
+  lastFrameAt = millis();
 }
 
 String getBGcolor() {
@@ -96,21 +194,75 @@ String getPassword() {
   return (value);
 }
 
+bool writeSetting(const char* path, const String& value) {
+  File setting = SPIFFS.open(path, "w");
+  if (!setting) {
+    Serial.print("Unable to write ");
+    Serial.println(path);
+    return false;
+  }
+  setting.print(value);
+  setting.close();
+  return true;
+}
+
+String requestValue(AsyncWebServerRequest* request, const char* name) {
+  if (request->hasParam(name, true)) return request->getParam(name, true)->value();
+  if (request->hasParam(name)) return request->getParam(name)->value();
+  return "";
+}
+
+bool requestHasValue(AsyncWebServerRequest* request, const char* name) {
+  return request->hasParam(name, true) || request->hasParam(name);
+}
+
+String readConfigFile(const char* path) {
+  File file = SPIFFS.open(path, "r");
+  if (!file) return "";
+  String value = file.readString();
+  file.close();
+  value.trim();
+  return value;
+}
+
+void startNetwork() {
+  String stationSsid = readConfigFile("/ssid.txt");
+  String stationPassword = readConfigFile("/password.txt");
+  WiFi.mode(WIFI_STA);
+  if (stationSsid.length() > 0) {
+    WiFi.begin(stationSsid.c_str(), stationPassword.c_str());
+    unsigned long started = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - started < 10000UL) {
+      delay(100);
+    }
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("GS450H-Inverter", WIFI_AP_PASSWORD);
+    Serial.println("Wi-Fi STA unavailable; started fallback AP");
+  } else {
+    Serial.print("Wi-Fi STA connected: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  ArduinoOTA.setHostname(otaHostname);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.begin();
+}
+
 void setup() {
   // Serial port for debugging purposes
   Serial.begin(19200);
 
-  // Initialize SPIFFS
+  // Initialize the deployed filesystem. ESP8266 uses LittleFS under the
+  // existing SPIFFS name so route/file compatibility is preserved.
   if (!SPIFFS.begin()) {
-    Serial.println("An Error has occurred while mounting SPIFFS");
+    Serial.println("An error occurred while mounting the filesystem");
     return;
   }
 
-  Serial.println(getSsid());
-  Serial.println(getPassword());
-  //Start WiFi AP mode
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(getSsid(), getPassword());
+  startNetwork();
 
   // Route for root / web pages
   server.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
@@ -150,7 +302,17 @@ void setup() {
     request->send_P(200, "text/plain", mg2Temp().c_str());
   });
   server.on("/oilPressure", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", oilPressure().c_str());
+    request->send_P(200, "text/plain", oilPumpPwm().c_str());
+  });
+  server.on("/oilPumpPwm", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", oilPumpPwm().c_str());
+  });
+  server.on("/telemetry", HTTP_GET, [](AsyncWebServerRequest * request) {
+    String response = telemetryJson;
+    unsigned long age = lastFrameAt == 0 ? 4294967295UL : millis() - lastFrameAt;
+    int marker = response.indexOf("\"ageMs\":0");
+    if (marker >= 0) response.replace("\"ageMs\":0", "\"ageMs\":" + String(age));
+    request->send(200, "application/json", response);
   });
   server.on("/getBGcolor", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send_P(200, "text/plain", getBGcolor().c_str());
@@ -161,27 +323,29 @@ void setup() {
   server.on("/getPassword", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send_P(200, "text/plain", getPassword().c_str());
   });
+  server.on("/getStationSsid", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", readConfigFile("/ssid.txt").c_str());
+  });
+  server.on("/getStationPassword", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", readConfigFile("/password.txt").c_str());
+  });
   server.on("/getHeading", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send_P(200, "text/plain", getHeading().c_str());
   });
-  server.on("/setBGcolor", HTTP_GET, [](AsyncWebServerRequest * request) {
-    //Serial.println(request->getParam("favcolor")->value());
-    File BGcolor = SPIFFS.open("/BGcolor.txt", "w");
-    BGcolor.print(request->getParam("favcolor")->value());
-    BGcolor.close();
-
-    File Heading = SPIFFS.open("/Heading.txt", "w");
-    Heading.print(request->getParam("heading")->value());
-    Heading.close();
-
-    File ssid = SPIFFS.open("/ssid.txt", "w");
-    ssid.print(request->getParam("ssid")->value());
-    ssid.close();
-
-    File password = SPIFFS.open("/password.txt", "w");
-    password.print(request->getParam("password")->value());
-    password.close();
-
+  server.on("/setBGcolor", HTTP_ANY, [](AsyncWebServerRequest * request) {
+    if (requestHasValue(request, "favcolor"))
+      writeSetting("/BGcolor.txt", requestValue(request, "favcolor"));
+    if (requestHasValue(request, "heading"))
+      writeSetting("/Heading.txt", requestValue(request, "heading"));
+    if (requestHasValue(request, "ssid"))
+      writeSetting("/ssid.txt", requestValue(request, "ssid"));
+    if (requestHasValue(request, "password"))
+      writeSetting("/password.txt", requestValue(request, "password"));
+    // The deployed layout uses these same files for station credentials.
+    if (requestHasValue(request, "stationSsid"))
+      writeSetting("/ssid.txt", requestValue(request, "stationSsid"));
+    if (requestHasValue(request, "stationPassword"))
+      writeSetting("/password.txt", requestValue(request, "stationPassword"));
     request->redirect("/");
   });
 
@@ -189,27 +353,18 @@ void setup() {
 }
 
 void loop() {
-  String justRates = Serial.readStringUntil('\n');
-  //split justrate variable from begining to first "," charactor
-  int x1stSpaceIndex = justRates.indexOf(",");
-  int x2ndSpaceIndex = justRates.indexOf(",", x1stSpaceIndex + 1);
-  int x3rdSpaceIndex = justRates.indexOf(",", x2ndSpaceIndex + 1);
-  int x4thSpaceIndex = justRates.indexOf(",", x3rdSpaceIndex + 1);
-  int x5thSpaceIndex = justRates.indexOf(",", x4thSpaceIndex + 1);
-  int x6thSpaceIndex = justRates.indexOf(",", x5thSpaceIndex + 1);
-  int x7thSpaceIndex = justRates.indexOf(",", x6thSpaceIndex + 1);
-  v = (justRates.substring(1, x1stSpaceIndex)).toInt();
-  i = (justRates.substring(x1stSpaceIndex + 2, x2ndSpaceIndex));
-  p = (justRates.substring(x2ndSpaceIndex + 2, x3rdSpaceIndex));
-  m = (justRates.substring(x3rdSpaceIndex + 2, x4thSpaceIndex));
-  n = (justRates.substring(x4thSpaceIndex + 2, x5thSpaceIndex));
-  o = (justRates.substring(x5thSpaceIndex + 2, x6thSpaceIndex));
-  r = (justRates.substring(x6thSpaceIndex + 2, x7thSpaceIndex));
-  q = (justRates.substring(x7thSpaceIndex + 2)).toInt();
-
-  Serial.println();
-  Serial.print("Serial input - ");
-  Serial.println(justRates);
-  Serial.print("Split values - ");
-  Serial.println("v : " + String(v) + " i : " + String(i) + " p : " + (p) + " m : " + String(m) + " n : " + String(n) + " o : " + String(o) + " r " + String(r) + " q : " + String(q));
+  ArduinoOTA.handle();
+  while (Serial.available() > 0) {
+    char incoming = static_cast<char>(Serial.read());
+    if (incoming == '\n' || incoming == '\r') {
+      serialFrame.trim();
+      if (serialFrame.startsWith("@")) parseFramedTelemetry(serialFrame);
+      else if (serialFrame.startsWith("v")) parseLegacyTelemetry(serialFrame);
+      serialFrame = "";
+    } else if (serialFrame.length() < 512) {
+      serialFrame += incoming;
+    } else {
+      serialFrame = "";
+    }
+  }
 }

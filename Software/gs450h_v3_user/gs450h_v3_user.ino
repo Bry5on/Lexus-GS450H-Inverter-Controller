@@ -335,8 +335,10 @@ void handle_wifi(){
 /*
  *
  * Routine to send data to wifi on serial 2
-The information will be provided over serial to the esp8266 at 19200 baud 8n1 in the form :
-vxxx,ixxx,pxxx,mxxxx,nxxxx,oxxx,rxxx,qxxx* where :
+The information is provided over serial to the ESP8266 at 19200 baud 8n1:
+@v=...;i=...;p=...;m=...;n=...;o=...;r=...;q=...;...*
+
+The first eight fields retain the original protocol meanings:
 
 v=pack voltage (0-700Volts)
 i=current (0-1000Amps)
@@ -348,35 +350,52 @@ r=mg2 temp (-20 to 120C)
 q=oil pressure (0-100%)
 *=end of string
 xxx=three digit integer for each parameter eg p100 = 100kw.
-updates will be every 100ms approx.
+The current v3 user loop sends approximately once per second.
 
-v100,i200,p35,m3000,n4000,o20,r100,q50*
+The remaining fields are read-only diagnostics. A newline after the frame
+lets the ESP8266 reject incomplete records.
 */
-
-//Serial2.print("v100,i200,p35,m3000,n4000,o20,r30,q50*"); //test string
 
 digitalWrite(13,!digitalRead(13));//blink led every time we fire this interrrupt.
 
-Serial2.print("v");//dc bus voltage
-//Serial2.print(dc_bus_voltage);//voltage derived from Lexus inverter
-Serial2.print(Sensor.Voltage);//voltage derived from ISA shunt
-Serial2.print(",i");//dc current
-Serial2.print(Sensor.Amperes);//current derived from ISA shunt
-//Serial2.print(0);
-Serial2.print(",p");//total motor power
-Serial2.print(Sensor.KW);//Power value derived from ISA Shunt
-//Serial2.print(0);
-Serial2.print(",m");//mg1 rpm
-Serial2.print(abs(mg1_speed));
-Serial2.print(",n");//mg2 rpm
-Serial2.print(abs(mg2_speed));
-Serial2.print(",o");//mg1 temp. Using higher of two stator temps
-Serial2.print(high_stat);
-Serial2.print(",r");//mg2 temp. Using water temp for now
-Serial2.print(temp_inv_water);
-Serial2.print(",q");// pwm percent on oil pump
-Serial2.print(parameters.PumpPWM);// disply oil pump speed in %.
-Serial2.print("*");// end of data indicator
+int throttle_percent = 0;
+if (ThrotRange > 0) {
+  throttle_percent = constrain(
+    map(ThrotVal, parameters.Min_throttleVal, parameters.Max_throttleVal, 0, 100),
+    0, 100);
+}
+
+Serial2.print("@v="); Serial2.print(Sensor.Voltage);
+Serial2.print(";i="); Serial2.print(Sensor.Amperes);
+Serial2.print(";p="); Serial2.print(Sensor.KW);
+Serial2.print(";m="); Serial2.print(abs(mg1_speed));
+Serial2.print(";n="); Serial2.print(abs(mg2_speed));
+Serial2.print(";o="); Serial2.print(mg1_stat, 1);
+Serial2.print(";r="); Serial2.print(mg2_stat, 1);
+Serial2.print(";q="); Serial2.print(parameters.PumpPWM); // legacy field: oil-pump PWM command (%)
+Serial2.print(";iw="); Serial2.print(temp_inv_water);
+Serial2.print(";il="); Serial2.print(temp_inv_inductor);
+Serial2.print(";tt="); Serial2.print(readThermistor(analogRead(TransTemp)), 1);
+Serial2.print(";ot="); Serial2.print(readThermistor(analogRead(OilpumpTemp)), 1);
+Serial2.print(";th="); Serial2.print(throttle_percent);
+Serial2.print(";brakeOut="); Serial2.print(digitalRead(Out1)); // Out1 brake-light output, not a pedal input
+Serial2.print(";gear="); Serial2.print(gear);
+Serial2.print(";sel="); Serial2.print(parameters.selGear ? 1 : 0);
+Serial2.print(";in1="); Serial2.print(digitalRead(IN1));
+Serial2.print(";in2="); Serial2.print(digitalRead(IN2));
+Serial2.print(";low="); Serial2.print(digitalRead(Low_In));
+Serial2.print(";sl1="); Serial2.print(digitalRead(TransSL1));
+Serial2.print(";sl2="); Serial2.print(digitalRead(TransSL2));
+Serial2.print(";sp="); Serial2.print(digitalRead(TransSP));
+Serial2.print(";pb1="); Serial2.print(digitalRead(TransPB1));
+Serial2.print(";pb2="); Serial2.print(digitalRead(TransPB2));
+Serial2.print(";pb3="); Serial2.print(digitalRead(TransPB3));
+Serial2.print(";inverterPower="); Serial2.print(digitalRead(InvPower));
+Serial2.print(";inverterRequest="); Serial2.print(digitalRead(pin_inv_req));
+Serial2.print(";oilPumpPower="); Serial2.print(digitalRead(OilPumpPower));
+Serial2.print(";md="); Serial2.print(mth_good ? 1 : 0);
+Serial2.print(";is="); Serial2.print(inv_status);
+Serial2.println("*");
 
 }
 
