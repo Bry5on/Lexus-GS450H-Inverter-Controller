@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8">
+  <title>GS450H telemetry</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111827; --card:#1f2937; --muted:#9ca3af; --good:#34d399; --warn:#fbbf24; --bad:#f87171; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:16px; background:var(--bg); color:#f9fafb; font:16px system-ui,sans-serif; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:0 auto 16px; max-width:1000px; }
+    h1 { font-size:1.35rem; margin:0; } h2 { font-size:1rem; margin:0 0 12px; color:#d1d5db; }
+    #connection { color:var(--muted); font-size:.85rem; text-align:right; }
+    #connection.good { color:var(--good); } #connection.bad { color:var(--bad); }
+    main { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px; max-width:1000px; margin:auto; }
+    section { background:var(--card); border-radius:12px; padding:14px; box-shadow:0 2px 8px #0003; }
+    .gauge-panel { grid-column:1 / -1; }
+    .gauge-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; }
+    .gauge { min-width:0; padding:10px 6px 8px; border-radius:10px; background:#111827; text-align:center; }
+    .gauge-name { color:var(--muted); font-size:.8rem; }
+    .gauge svg { display:block; width:100%; max-width:170px; height:auto; margin:0 auto; overflow:visible; }
+    .gauge-arc-track,.gauge-arc-value { fill:none; stroke-width:9; stroke-linecap:round; }
+    .gauge-arc-track { stroke:#374151; }
+    .gauge-arc-value { stroke:var(--good); stroke-dasharray:100; stroke-dashoffset:100; transition:stroke-dashoffset .2s ease; }
+    .gauge-arc-value.over { stroke:var(--warn); }
+    .gauge-reading { fill:#f9fafb; font-size:19px; font-weight:600; text-anchor:middle; }
+    .gauge-reading.missing { font-size:10px; }
+    .gauge-unit { fill:var(--muted); font-size:10px; text-anchor:middle; }
+    .gauge-range { display:flex; justify-content:space-between; color:var(--muted); font-size:.68rem; }
+    .metric { display:flex; justify-content:space-between; align-items:baseline; border-top:1px solid #374151; padding:8px 0 0; margin-top:8px; }
+    .metric:first-of-type { border-top:0; margin-top:0; } .label { color:var(--muted); }
+    .value { font-size:1.15rem; font-variant-numeric:tabular-nums; } .unit { color:var(--muted); font-size:.8rem; margin-left:4px; }
+    .unavailable-value { color:var(--muted); font-size:.75rem; text-align:right; }
+    .badge { border-radius:999px; padding:3px 9px; font-size:.8rem; background:#374151; }
+    .on { color:var(--good); } .off { color:var(--muted); } .fault { color:var(--bad); }
+    .note { max-width:1000px; margin:14px auto 0; color:var(--muted); font-size:.78rem; }
+  </style>
+</head>
+<body>
+  <header><h1 id="heading1">GS450H inverter telemetry</h1><div id="connection">Waiting for data...</div></header>
+  <main>
+    <section class="gauge-panel"><h2>Live gauges</h2><div id="gauges" class="gauge-grid"></div></section>
+    <section><h2>Electrical</h2>
+      <div class="metric"><span class="label">HV bus</span><span><b data-k="v">-</b><span class="unit">V</span></span></div>
+      <div class="metric"><span class="label">DC current</span><span><b data-k="i">-</b><span class="unit">A</span></span></div>
+      <div class="metric"><span class="label">Power</span><span><b data-k="p">-</b><span class="unit">kW</span></span></div>
+    </section>
+    <section><h2>Motor speeds and temperatures</h2>
+      <div class="metric"><span class="label">MG1 speed</span><span><b data-k="m">-</b><span class="unit">rpm</span></span></div>
+      <div class="metric"><span class="label">MG2 speed</span><span><b data-k="n">-</b><span class="unit">rpm</span></span></div>
+      <div class="metric"><span class="label" id="stator1Label">MG1 stator</span><span><b data-k="o">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label" id="stator2Label">MG2 stator</span><span><b data-k="r">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric" id="mg2LegacyRow" hidden><span class="label">MG2 stator</span><span class="unavailable-value">Not sent by legacy firmware</span></div>
+      <div class="metric" id="inverterWaterRow"><span class="label">Inverter water</span><span><b data-k="iw">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Inverter inductor</span><span><b data-k="il">-</b><span class="unit">&deg;C</span></span></div>
+    </section>
+    <section><h2>Transmission and inputs</h2>
+      <div class="metric"><span class="label">Gear</span><span class="value" id="gear">-</span></div>
+      <div class="metric"><span class="label">Selector inputs</span><span class="value" id="selector">-</span></div>
+      <div class="metric"><span class="label">Transmission temp</span><span><b data-k="tt">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Oil-pump temp</span><span><b data-k="ot">-</b><span class="unit">&deg;C</span></span></div>
+      <div class="metric"><span class="label">Oil-pump PWM command</span><span><b data-k="q">-</b><span class="unit">%</span></span></div>
+      <div class="metric"><span class="label">Throttle / brake-light output</span><span><b data-k="th">-</b><span class="unit">% / </span><span id="brakeOut">-</span></span></div>
+    </section>
+    <section><h2>Outputs and status</h2>
+      <div class="metric"><span class="label">Trans SL1 / SL2 / SP</span><span id="solenoids">-</span></div>
+      <div class="metric"><span class="label">Trans PB1 / PB2 / PB3 inputs</span><span id="transInputs">-</span></div>
+      <div class="metric"><span class="label">Inverter power / request outputs</span><span id="inverter">-</span></div>
+      <div class="metric"><span class="label">Oil-pump power output</span><span id="oilPower">-</span></div>
+      <div class="metric"><span class="label">Inverter data</span><span id="dataStatus">-</span></div>
+      <div class="metric"><span class="label">Startup status</span><span><span id="invStatus" class="badge">-</span></span></div>
+    </section>
+  </main>
+  <p class="note">Read-only display. Values are marked stale when a complete telemetry frame has not arrived recently.</p>
+<script>
+  const labels = {0:'Park',1:'Reverse',2:'Neutral',3:'Drive'};
+  const keys = ['v','i','p','m','n','o','r','iw','il','tt','ot','q','th'];
+  const gaugeDefs = [
+    {key:'v', label:'Pack voltage', unit:'V', min:0, max:430},
+    {key:'i', label:'DC current magnitude', unit:'A', min:0, max:550, magnitude:true},
+    {key:'p', label:'Power magnitude', unit:'kW', min:0, max:300, magnitude:true},
+    {key:'m', label:'MG1 speed', unit:'rpm', min:0, max:10000},
+    {key:'n', label:'MG2 speed', unit:'rpm', min:0, max:10000},
+    {key:'o', label:'MG1 stator', legacyLabel:'Higher stator temp', unit:'&deg;C', min:-20, max:120},
+    {key:'r', label:'MG2 stator', legacyLabel:'Inverter water temp', unit:'&deg;C', min:-20, max:120},
+    {key:'iw', label:'Inverter water', unit:'&deg;C', min:-20, max:150},
+    {key:'il', label:'Inverter inductor', unit:'&deg;C', min:-20, max:150},
+    {key:'tt', label:'Transmission', unit:'&deg;C', min:-20, max:120},
+    {key:'ot', label:'Oil-pump temp', unit:'&deg;C', min:-20, max:120},
+    {key:'q', label:'Oil-pump PWM', unit:'%', min:0, max:100}
+  ];
+  document.getElementById('gauges').innerHTML = gaugeDefs.map(g => `
+    <div class="gauge">
+      <div class="gauge-name">${g.label}</div>
+      <svg viewBox="0 0 160 104" role="img" aria-label="${g.label} gauge">
+        <path class="gauge-arc-track" d="M 20 76 A 60 60 0 0 1 140 76" pathLength="100"></path>
+        <path id="arc-${g.key}" class="gauge-arc-value" d="M 20 76 A 60 60 0 0 1 140 76" pathLength="100"></path>
+        <text id="gauge-value-${g.key}" class="gauge-reading" x="80" y="68">-</text>
+        <text class="gauge-unit" x="80" y="84">${g.unit}</text>
+      </svg>
+      <div class="gauge-range"><span>${g.min}</span><span>${g.max}</span></div>
+    </div>`).join('');
+  const text = (value, digits=1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '-';
+  const state = (value, on='ON', off='OFF') => Number(value) ? `<span class="on">${on}</span>` : `<span class="off">${off}</span>`;
+  function updateGauge(gauge, value, expanded) {
+    const arc = document.getElementById(`arc-${gauge.key}`);
+    const reading = document.getElementById(`gauge-value-${gauge.key}`);
+    const numeric = Number(value);
+    if (value === undefined || value === null || value === '' || !Number.isFinite(numeric)) {
+      arc.style.strokeDashoffset = '100';
+      arc.classList.remove('over');
+      reading.textContent = expanded ? '-' : 'Not sent';
+      reading.classList.add('missing');
+      return;
+    }
+    reading.classList.remove('missing');
+    const scaled = gauge.magnitude ? Math.abs(numeric) : numeric;
+    const percentage = Math.max(0, Math.min((scaled - gauge.min) / (gauge.max - gauge.min) * 100, 100));
+    arc.style.strokeDashoffset = String(100 - percentage);
+    arc.classList.toggle('over', scaled > gauge.max);
+    reading.textContent = String(value);
+  }
+  function render(data) {
+    if (!data || data.ok !== true) throw new Error('invalid frame');
+    const expanded = data.expanded === true;
+    const unavailable = expanded ? '-' : 'Not sent by legacy firmware';
+    keys.forEach(k => {
+      const node=document.querySelector(`[data-k="${k}"]`);
+      if (node) {
+        const missing = data[k] === undefined || data[k] === null || data[k] === '';
+        node.textContent = missing ? unavailable : text(data[k]);
+        node.classList.toggle('unavailable-value', missing);
+      }
+    });
+    gaugeDefs.forEach(g => {
+      const gaugeCard = document.querySelector(`#arc-${g.key}`).closest('.gauge');
+      const name = gaugeCard.querySelector('.gauge-name');
+      name.textContent = !expanded && g.legacyLabel ? g.legacyLabel : g.label;
+      gaugeCard.hidden = !expanded && g.key === 'iw';
+      updateGauge(g, data[g.key], expanded);
+    });
+    document.getElementById('stator1Label').textContent = expanded ? 'MG1 stator' : 'Higher stator temp';
+    document.getElementById('stator2Label').textContent = expanded ? 'MG2 stator' : 'Inverter water temp';
+    document.getElementById('mg2LegacyRow').hidden = expanded;
+    document.getElementById('inverterWaterRow').hidden = !expanded;
+    document.getElementById('gear').textContent = data.gear === undefined ? unavailable : (labels[data.gear] || '-');
+    const selectorKeys = ['in1','in2','low'];
+    document.getElementById('selector').textContent = selectorKeys.every(k => data[k] !== undefined)
+      ? `IN1 ${data.in1?'HIGH':'LOW'} / IN2 ${data.in2?'HIGH':'LOW'} / LOW ${data.low?'HIGH':'LOW'}`
+      : unavailable;
+    const availableState = (...values) => values.some(v => v === undefined || v === null || v === '')
+      ? `<span class="off">${unavailable}</span>`
+      : values.map(v => state(v)).join(' / ');
+    document.getElementById('brakeOut').innerHTML = availableState(data.brakeOut);
+    document.getElementById('solenoids').innerHTML = availableState(data.sl1, data.sl2, data.sp);
+    document.getElementById('transInputs').innerHTML = availableState(data.pb1, data.pb2, data.pb3);
+    document.getElementById('inverter').innerHTML = availableState(data.inverterPower, data.inverterRequest);
+    document.getElementById('oilPower').innerHTML = availableState(data.oilPumpPower);
+    document.getElementById('dataStatus').innerHTML = data.md === undefined
+      ? `<span class="off">${unavailable}</span>`
+      : (Number(data.md) ? '<span class="on">VALID</span>' : '<span class="fault">INVALID</span>');
+    document.getElementById('invStatus').textContent = data.is === undefined
+      ? unavailable : `code ${data.is}`;
+    const age = Number(data.ageMs);
+    const connection = document.getElementById('connection');
+    if (!Number.isFinite(age) || age > 3000) { connection.textContent='Stale data'; connection.className='bad'; }
+    else { connection.textContent=`Live - ${age} ms`; connection.className='good'; }
+  }
+  async function poll() {
+    try { const response=await fetch('/telemetry', {cache:'no-store'}); if (!response.ok) throw new Error('HTTP '+response.status); render(await response.json()); }
+    catch (error) { const node=document.getElementById('connection'); node.textContent='No valid telemetry'; node.className='bad'; }
+  }
+  poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>
