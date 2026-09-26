@@ -955,6 +955,50 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     Can0.sendFrame(outframe);
     Can1.sendFrame(outframe);
 
+    // 0x0AB — analog Serial2 fields not already packed in 0x0AA
+    // b0-1 Voltage*10 (V), b2-3 kW*10 signed, b4-5 |mg2| rpm,
+    // b6 throttle %, b7 oil-pump PWM %
+    {
+      uint16_t v10 = (uint16_t)constrain((long)(Sensor.Voltage * 10.0f), 0L, 65535L);
+      int16_t  p10 = (int16_t)constrain((long)(Sensor.KW * 10.0f), -32768L, 32767L);
+      uint16_t n_rpm = (uint16_t)constrain((long)abs(mg2_speed), 0L, 65535L);
+      outframe.id = 0x0AB;
+      outframe.length = 8;
+      outframe.extended = 0;
+      outframe.rtr = 0;
+      outframe.data.bytes[0] = lowByte(v10);
+      outframe.data.bytes[1] = highByte(v10);
+      outframe.data.bytes[2] = lowByte((uint16_t)p10);
+      outframe.data.bytes[3] = highByte((uint16_t)p10);
+      outframe.data.bytes[4] = lowByte(n_rpm);
+      outframe.data.bytes[5] = highByte(n_rpm);
+      outframe.data.bytes[6] = (uint8_t)constrain(throttle_percent, 0, 255);
+      outframe.data.bytes[7] = (uint8_t)constrain(parameters.PumpPWM, 0, 255);
+      Can0.sendFrame(outframe);
+      Can1.sendFrame(outframe);
+    }
+
+    // 0x0AC — remaining analog temps + full MG1 rpm (no inv_status)
+    // b0 mg1 C, b1 mg2 C, b2 inductor C, b3 trans C, b4 oil-pump C,
+    // b5 gear, b6-7 |mg1| rpm LE
+    {
+      uint16_t m_rpm = (uint16_t)constrain((long)abs(mg1_speed), 0L, 65535L);
+      outframe.id = 0x0AC;
+      outframe.length = 8;
+      outframe.extended = 0;
+      outframe.rtr = 0;
+      outframe.data.bytes[0] = (uint8_t)constrain((int)mg1_stat, 0, 255);
+      outframe.data.bytes[1] = (uint8_t)constrain((int)mg2_stat, 0, 255);
+      outframe.data.bytes[2] = (uint8_t)constrain((int)temp_inv_inductor, 0, 255);
+      outframe.data.bytes[3] = (uint8_t)constrain((int)(transmissionTemp + 0.5f), 0, 255);
+      outframe.data.bytes[4] = (uint8_t)constrain((int)(oilPumpTemp + 0.5f), 0, 255);
+      outframe.data.bytes[5] = (uint8_t)gear;
+      outframe.data.bytes[6] = lowByte(m_rpm);
+      outframe.data.bytes[7] = highByte(m_rpm);
+      Can0.sendFrame(outframe);
+      Can1.sendFrame(outframe);
+    }
+
     outframe.id = 0x05C;            // Set our transmission address ID, OBD2 standard oil temp: https://en.wikipedia.org/wiki/OBD-II_PIDs
     outframe.length = 1;            // Data payload 1 byte
     outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
