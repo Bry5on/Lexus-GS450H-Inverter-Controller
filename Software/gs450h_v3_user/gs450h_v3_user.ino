@@ -949,7 +949,7 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     outframe.data.bytes[3] = CoolantCAN; //coolant temp in C. Gauge range 0 - 100C
     outframe.data.bytes[4] = lowByte(RPM);
     outframe.data.bytes[5] = highByte(RPM);
-    outframe.data.bytes[6] = (uint8_t) abs(Sensor.Amperes) / 2; //Measured current value in A/2
+    outframe.data.bytes[6] = (uint8_t)(fabsf(Sensor.Amperes) / 2.0f); // |A|/2, divide before uint8 (avoids wrap at 256A)
     outframe.data.bytes[7] = 0x00;
 
     Can0.sendFrame(outframe);
