@@ -943,7 +943,7 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     outframe.length = 8;            // Data payload 8 bytes
     outframe.extended = 0;          // Extended addresses - 0=11-bit 1=29bit
     outframe.rtr = 0;                 // data frame (not a remote request)
-    outframe.data.bytes[0] = map(torque, 0, 3500, 0, 100); // Torque percentage requested (1bit=1%)
+    outframe.data.bytes[0] = (uint8_t)(int8_t)constrain(map(torque, -3500, 3500, -100, 100), -128, 127); // signed torque %
     outframe.data.bytes[1] = vehicle_doublespeed; //Two times the car's ground speed in mph * 2
     outframe.data.bytes[2] = StatorCAN; //higher of both stator temps in C. Gauge range 80 - 150C
     outframe.data.bytes[3] = CoolantCAN; //coolant temp in C. Gauge range 0 - 100C
