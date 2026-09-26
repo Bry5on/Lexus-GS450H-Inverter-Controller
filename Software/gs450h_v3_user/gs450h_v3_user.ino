@@ -958,6 +958,23 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     // 0x0AB — analog Serial2 fields not already packed in 0x0AA
     // b0-1 Voltage*10 (V), b2-3 kW*10 signed, b4-5 |mg2| rpm,
     // b6 throttle %, b7 oil-pump PWM %
+    int throttle_percent = 0;
+    if (ThrotRange > 0) {
+      throttle_percent = constrain(
+        map(ThrotVal, parameters.Min_throttleVal, parameters.Max_throttleVal, 0, 100),
+        0, 100);
+    }
+    float transmissionTemp = 0.0f;
+    readThermistor(
+      analogRead(TransTemp), transmissionThermistorProfile.resistanceAt25C,
+      transmissionThermistorProfile.beta, transmissionThermistorProfile.pullupResistance,
+      transmissionTemp);
+    float oilPumpTemp = 0.0f;
+    readThermistor(
+      analogRead(OilpumpTemp), oilPumpThermistorProfile.resistanceAt25C,
+      oilPumpThermistorProfile.beta, oilPumpThermistorProfile.pullupResistance,
+      oilPumpTemp);
+
     {
       uint16_t v10 = (uint16_t)constrain((long)(Sensor.Voltage * 10.0f), 0L, 65535L);
       int16_t  p10 = (int16_t)constrain((long)(Sensor.KW * 10.0f), -32768L, 32767L);
