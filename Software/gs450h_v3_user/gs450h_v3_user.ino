@@ -106,6 +106,10 @@ byte inv_status=1,
 
 bool htm_sent=0,
      mth_good=0;
+uint32_t last_mth_valid_us=0;
+uint8_t consecutive_mth_valid=0;
+uint32_t startupDogReadyMs=0;
+bool shiftFault=false;
 
 int oil_power=120; //oil pump pwm value
 
@@ -208,6 +212,7 @@ ControlParams parameters;
 
 // Draft: one-pedal hold on MG1, MG2 regen scaled by the 2-speed, and a latched dog shift.
 void applyDrivetrainTorque(int16_t mapTorque);
+void updateBrakeLight();
 
 short get_torque()
 {
@@ -276,10 +281,6 @@ short get_torque()
     if (readIndex >= numReadings) readIndex = 0; // if we're at the end of the array...wrap around to the beginning
     
     smoothtorque = total / numReadings; // calculate the average of the torque commands
-    
-    if(smoothtorque < -70 && gear==DRIVE) digitalWrite(Out1,HIGH); //Set Out1 as brake light output during regen greater than normal engine coast, down to 3.75mph in jag
-    else if(ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64)) digitalWrite(Out1,HIGH); //Set Out1 as brake light output when throttle pedal is <1.5%
-    else digitalWrite(Out1,LOW); //turn off Out1 as brake light when not regenerating
     return smoothtorque; //return torque
 }
 
@@ -305,11 +306,12 @@ void setup() {
   pinMode(TransSL2,OUTPUT); //Trans solenoids
   pinMode(TransSP,OUTPUT); //Trans solenoids
 
-  digitalWrite(InvPower,HIGH);  //turn on at startup
   digitalWrite(Out1,LOW);  //turn off at startup
   digitalWrite(TransSL1,LOW);  //turn off at startup
   digitalWrite(TransSL2,LOW);  //turn off at startup
   digitalWrite(TransSP,LOW);  //turn off at startup
+  startupDogReadyMs=millis()+250;
+  digitalWrite(InvPower,HIGH);  //turn on after selecting the default high dog state
 
   pinMode(IN1,INPUT); //Input 1
   pinMode(IN2,INPUT); //Input 2
@@ -429,6 +431,7 @@ Serial2.print(";inverterPower="); Serial2.print(digitalRead(InvPower));
 Serial2.print(";inverterRequest="); Serial2.print(digitalRead(pin_inv_req));
 Serial2.print(";oilPumpPower="); Serial2.print(digitalRead(OilPumpPower));
 Serial2.print(";md="); Serial2.print(mth_good ? 1 : 0);
+Serial2.print(";sf="); Serial2.print(shiftFault ? 1 : 0);
 Serial2.print(";is="); Serial2.print(inv_status);
 Serial2.println("*");
 
@@ -487,12 +490,25 @@ void control_inverter() {
     htm_sent=0;
     mth_byte=0;
     mth_checksum=0;
+    bool mth_frame_overflow=false;
 
     for(int i=0;i<100;i++)mth_data[i]=0;
-    while(Serial1.available()){mth_data[mth_byte]=Serial1.read();mth_byte++;}
+    while(Serial1.available()) {
+      byte incoming=Serial1.read();
+      if(mth_byte<sizeof(mth_data))mth_data[mth_byte++]=incoming;
+      else mth_frame_overflow=true;
+    }
 
     for(int i=0;i<98;i++)mth_checksum+=mth_data[i];
-    if(mth_checksum==(mth_data[98]|(mth_data[99]<<8)))mth_good=1;else mth_good=0;
+    if(!mth_frame_overflow && mth_byte==sizeof(mth_data) &&
+       mth_checksum==(mth_data[98]|(mth_data[99]<<8))) {
+      mth_good=1;
+      last_mth_valid_us=micros();
+      if (consecutive_mth_valid < 3) consecutive_mth_valid++;
+    } else {
+      mth_good=0;
+      consecutive_mth_valid=0;
+    }
     last_packet=micros();
     digitalWrite(pin_inv_req,0);
   }
@@ -813,6 +829,8 @@ static const int16_t SLEW_STEP = 40;           // counts per 10 ms, same sign
 static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossing lash
 static const uint16_t LASH_DWELL_MS = 50;
 static const uint16_t UNLOAD_DWELL_MS = 100;
+static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
+static const int16_t MG2_LOW_SPEED_RATIO_LIMIT = 500;
 static const int16_t MG2_UPSHIFT_START = 6500; // begin so the dog is home by 7000
 static const int16_t MG2_UPSHIFT_HARD = 7000;
 static const int16_t MG2_DOWNSHIFT_RESULT = 3000;
@@ -823,10 +841,11 @@ enum ShiftPhase {
   PHASE_DWELL,
   PHASE_ACTUATE,
   PHASE_CONFIRM,
-  PHASE_RELOAD
+  PHASE_RELOAD,
+  PHASE_FAULT
 };
 
-static bool ratioIsLow = false;       // dog we believe is seated
+static bool ratioIsLow = false;       // startup commands high; this tracks the commanded dog state
 static bool pendingLow = false;
 static ShiftPhase shiftPhase = PHASE_IDLE;
 static uint32_t shiftStartedMs = 0;
@@ -843,9 +862,15 @@ static uint32_t slewMg1Until = 0;
 static int16_t slewMg2 = 0;
 static bool slewMg2Dwelling = false;
 static uint32_t slewMg2Until = 0;
+bool mthDataFresh()
+{
+  return consecutive_mth_valid >= 3 && last_mth_valid_us != 0 &&
+         (uint32_t)(micros() - last_mth_valid_us) <= MTH_FRESH_TIMEOUT_US;
+}
 
 int16_t iabs16(int16_t v)
 {
+  if (v == (-32767 - 1)) return 32767;
   return v < 0 ? (int16_t)-v : v;
 }
 
@@ -1007,22 +1032,30 @@ bool shiftConfirmed(uint32_t now)
   uint32_t elapsed = now - phaseMs;
   int16_t spd = iabs16(mg2_speed);
   int16_t before = iabs16(mg2AtShift);
-  if (before < 250 && spd < 400) return elapsed > 200;
+  if (before < MG2_LOW_SPEED_RATIO_LIMIT && spd < MG2_LOW_SPEED_RATIO_LIMIT)
+    return elapsed > 200;
   float scale = pendingLow ? (MG2_RATIO_LOW / MG2_RATIO_HIGH) : (MG2_RATIO_HIGH / MG2_RATIO_LOW);
   float expect = (float)before * scale;
   float err = (float)spd - expect;
   if (err < 0.0f) err = -err;
   float tol = expect * 0.30f;
-  if (tol < 300.0f) tol = 300.0f;
+  if (tol < 100.0f) tol = 100.0f;
   return elapsed > 80 && err < tol;
 }
 
 void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 {
+  if (shiftPhase == PHASE_FAULT) {
+    tgt1 = 0;
+    tgt2 = 0;
+    return;
+  }
+
   if (shiftPhase == PHASE_IDLE) {
     shiftFast = false;
     bool requestLow = wantLowDog();
-    if (requestLow != ratioIsLow && (int32_t)(now - retryAfterMs) >= 0) {
+    if (requestLow != ratioIsLow &&
+        (int32_t)(now - retryAfterMs) >= 0) {
       pendingLow = requestLow;
       shiftFast = ratioIsLow && iabs16(mg2_speed) >= MG2_UPSHIFT_HARD;
       shiftPhase = PHASE_HANDOFF;
@@ -1048,9 +1081,15 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
   }
 
   if (shiftPhase == PHASE_HANDOFF) {
-    if (iabs16(slewMg2) < 25 || (now - shiftStartedMs) > 800) {
+    if (iabs16(slewMg2) < 25) {
       shiftPhase = PHASE_DWELL;
       phaseMs = now;
+    } else if ((now - shiftStartedMs) > 800) {
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+      applyDog(ratioIsLow);
+      tgt1 = 0;
+      tgt2 = 0;
     }
   } else if (shiftPhase == PHASE_DWELL) {
     tgt2 = 0;
@@ -1070,9 +1109,11 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
       shiftPhase = PHASE_RELOAD;
       phaseMs = now;
     } else if ((now - phaseMs) > 500) {
-      applyDog(ratioIsLow);
-      shiftPhase = PHASE_IDLE;
-      retryAfterMs = now + 1000;
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+      applyDog(pendingLow);
+      tgt1 = 0;
+      tgt2 = 0;
     }
   } else if (shiftPhase == PHASE_RELOAD) {
     int16_t reloadOut = outEquiv(driver2, ratioIsLow);
@@ -1091,6 +1132,24 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 void applyDrivetrainTorque(int16_t mapTorque)
 {
   uint32_t now = millis();
+  if (!mthDataFresh() || (int32_t)(now - startupDogReadyMs) < 0) {
+    if (shiftPhase != PHASE_IDLE && shiftPhase != PHASE_FAULT) {
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+    }
+    mg1_torque = 0;
+    mg2_torque = 0;
+    slewMg1 = 0;
+    slewMg2 = 0;
+    holdI = 0.0f;
+    roadFilt = 0.0f;
+    settledSinceMs = now;
+    slewMg1Dwelling = false;
+    slewMg2Dwelling = false;
+    updateBrakeLight();
+    return;
+  }
+
   int16_t tgt1 = 0;
   int16_t tgt2 = 0;
   splitMapTorque(mapTorque, tgt1, tgt2);
@@ -1105,6 +1164,20 @@ void applyDrivetrainTorque(int16_t mapTorque)
     slewMg2 = 0;
     slewMg2Dwelling = false;
   }
+  updateBrakeLight();
+}
+
+void updateBrakeLight()
+{
+  bool regen = false;
+  if (gear == DRIVE && mthDataFresh()) {
+    regen = (mg1_torque < -70 && mg1_speed > 0) ||
+            (mg1_torque > 70 && mg1_speed < 0) ||
+            (mg2_torque < -70 && mg2_speed > 0) ||
+            (mg2_torque > 70 && mg2_speed < 0);
+  }
+  bool closedPedal = ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64);
+  digitalWrite(Out1, (regen || closedPedal) ? HIGH : LOW);
 }
 
 void changeGear()
