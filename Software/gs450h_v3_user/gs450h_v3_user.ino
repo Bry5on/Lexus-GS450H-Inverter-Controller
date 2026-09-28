@@ -829,6 +829,7 @@ static const int16_t SLEW_STEP = 40;           // counts per 10 ms, same sign
 static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossing lash
 static const uint16_t LASH_DWELL_MS = 50;
 static const uint16_t UNLOAD_DWELL_MS = 100;
+static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
 static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
 static const int16_t MG2_LOW_SPEED_RATIO_LIMIT = 500;
 static const int16_t MG2_UPSHIFT_START = 6500; // begin so the dog is home by 7000
@@ -1046,6 +1047,7 @@ bool shiftConfirmed(uint32_t now)
 void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 {
   if (shiftPhase == PHASE_FAULT) {
+    applyDog(iabs16(mg2_speed) >= MG2MAXSPEED ? false : ratioIsLow);
     tgt1 = 0;
     tgt2 = 0;
     return;
@@ -1053,8 +1055,9 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 
   if (shiftPhase == PHASE_IDLE) {
     shiftFast = false;
-    bool requestLow = wantLowDog();
-    if (requestLow != ratioIsLow &&
+    bool overspeed = iabs16(mg2_speed) >= MG2MAXSPEED;
+    bool requestLow = overspeed ? false : wantLowDog();
+    if ((requestLow != ratioIsLow || overspeed) &&
         (int32_t)(now - retryAfterMs) >= 0) {
       pendingLow = requestLow;
       shiftFast = ratioIsLow && iabs16(mg2_speed) >= MG2_UPSHIFT_HARD;
@@ -1084,7 +1087,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     if (iabs16(slewMg2) < 25) {
       shiftPhase = PHASE_DWELL;
       phaseMs = now;
-    } else if ((now - shiftStartedMs) > 800) {
+    } else if ((now - shiftStartedMs) > SHIFT_HANDOFF_TIMEOUT_MS) {
       shiftFault = true;
       shiftPhase = PHASE_FAULT;
       applyDog(ratioIsLow);
@@ -1111,7 +1114,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     } else if ((now - phaseMs) > 500) {
       shiftFault = true;
       shiftPhase = PHASE_FAULT;
-      applyDog(pendingLow);
+      applyDog(ratioIsLow);
       tgt1 = 0;
       tgt2 = 0;
     }
@@ -1159,7 +1162,7 @@ void applyDrivetrainTorque(int16_t mapTorque)
   int16_t step = shiftFast ? (int16_t)(SLEW_STEP * 3) : SLEW_STEP;
   mg1_torque = slewToward(slewMg1, slewMg1Dwelling, slewMg1Until, tgt1, now, step);
   mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, step);
-  if ((mg2_speed > MG2MAXSPEED) || (mg2_speed < -MG2MAXSPEED)) {
+  if (iabs16(mg2_speed) >= MG2MAXSPEED) {
     mg2_torque = 0;
     slewMg2 = 0;
     slewMg2Dwelling = false;
