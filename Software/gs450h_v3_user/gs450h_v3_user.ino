@@ -890,6 +890,7 @@ static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossin
 static const uint16_t LASH_DWELL_MS = 50;
 static const uint16_t UNLOAD_DWELL_MS = 100;
 static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
+static const uint16_t SHIFT_CONFIRM_TIMEOUT_MS = 1000;
 static const uint16_t DOG_POSITION_CONFIRM_MS = 100;
 static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
 static const uint32_t MTH_HOLD_RESET_TIMEOUT_US = 250000;
@@ -915,6 +916,8 @@ static uint32_t shiftStartedMs = 0;
 static uint32_t phaseMs = 0;
 static uint32_t dogPositionSinceMs = 0;
 static bool shiftFast = false;
+static bool awaitNeutralRelease = false;
+static bool faultNeutralSeen = false;
 static float holdI = 0.0f;
 static float roadFilt = 0.0f;
 static uint32_t settledSinceMs = 0;
@@ -1116,10 +1119,44 @@ bool dogPositionConfirmed(bool lowGear, uint32_t now)
 void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 {
   if (shiftPhase == PHASE_FAULT) {
-    applyDog(iabs16(mg2_speed) >= MG2MAXSPEED ? false : ratioIsLow);
+    if (gear == NEUTRAL) {
+      if (!faultNeutralSeen) {
+        faultNeutralSeen = true;
+        dogPositionSinceMs = 0;
+      }
+      int8_t position = dogPositionState();
+      if (position < 0) dogPositionSinceMs = 0;
+      else if (dogPositionConfirmed(position == 1, now)) {
+        ratioIsLow = position == 1;
+        pendingLow = ratioIsLow;
+        shiftFault = false;
+        shiftPhase = PHASE_IDLE;
+        shiftFast = false;
+        dogPositionSinceMs = 0;
+        faultNeutralSeen = false;
+        awaitNeutralRelease = true;
+        applyDog(ratioIsLow);
+      } else {
+        applyDog(iabs16(mg2_speed) >= MG2MAXSPEED ? false : ratioIsLow);
+      }
+    } else {
+      faultNeutralSeen = false;
+      dogPositionSinceMs = 0;
+      applyDog(iabs16(mg2_speed) >= MG2MAXSPEED ? false : ratioIsLow);
+    }
     tgt1 = 0;
     tgt2 = 0;
     return;
+  }
+
+  if (awaitNeutralRelease) {
+    if (gear == NEUTRAL) {
+      applyDog(ratioIsLow);
+      tgt1 = 0;
+      tgt2 = 0;
+      return;
+    }
+    awaitNeutralRelease = false;
   }
 
   if (shiftPhase == PHASE_IDLE) {
@@ -1179,7 +1216,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
       ratioIsLow = pendingLow;
       shiftPhase = PHASE_RELOAD;
       phaseMs = now;
-    } else if ((now - phaseMs) > 500) {
+    } else if ((now - phaseMs) > SHIFT_CONFIRM_TIMEOUT_MS) {
       shiftFault = true;
       shiftPhase = PHASE_FAULT;
       applyDog(ratioIsLow);
