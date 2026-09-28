@@ -17,6 +17,7 @@
 //#include <DueTimer.h>  //https://github.com/collin80/DueTimer
 #include <Wire_EEPROM.h>
 #include <ISA.h>  //isa can shunt library
+#include <stdio.h>
 
 #define MG2MAXSPEED 10000
 #define pin_inv_req 22
@@ -361,6 +362,59 @@ void setup() {
 
 }
 
+static char wifiTxBuffer[512];
+static size_t wifiTxLength = 0;
+static size_t wifiTxOffset = 0;
+
+void appendWifiText(const char* text)
+{
+  size_t remaining = sizeof(wifiTxBuffer) - wifiTxLength;
+  if (remaining == 0) return;
+  int written = snprintf(wifiTxBuffer + wifiTxLength, remaining, "%s", text);
+  if (written > 0) {
+    wifiTxLength += (size_t)written < remaining ? (size_t)written : remaining - 1;
+  }
+}
+
+void appendWifiInt(long value)
+{
+  char text[16];
+  snprintf(text, sizeof(text), "%ld", value);
+  appendWifiText(text);
+}
+
+void appendWifiFloat(float value, uint8_t decimalPlaces)
+{
+  long scale = decimalPlaces == 1 ? 10L : 100L;
+  long scaled = (long)(value * (float)scale + (value >= 0.0f ? 0.5f : -0.5f));
+  long whole = scaled / scale;
+  long fraction = scaled % scale;
+  if (scaled < 0) appendWifiText("-");
+  if (whole < 0) whole = -whole;
+  if (fraction < 0) fraction = -fraction;
+  appendWifiInt(whole);
+  appendWifiText(".");
+  char text[4];
+  snprintf(text, sizeof(text), decimalPlaces == 1 ? "%01ld" : "%02ld", fraction);
+  appendWifiText(text);
+}
+
+void service_wifi_tx()
+{
+  if (wifiTxOffset >= wifiTxLength) return;
+  int available = Serial2.availableForWrite();
+  if (available <= 0) return;
+  size_t remaining = wifiTxLength - wifiTxOffset;
+  size_t count = remaining < (size_t)available ? remaining : (size_t)available;
+  size_t written = Serial2.write(
+    (const uint8_t*)wifiTxBuffer + wifiTxOffset, count);
+  wifiTxOffset += written;
+  if (wifiTxOffset >= wifiTxLength) {
+    wifiTxOffset = 0;
+    wifiTxLength = 0;
+  }
+}
+
 void handle_wifi(){
 /*
  *
@@ -386,6 +440,9 @@ The remaining fields are read-only diagnostics. A newline after the frame
 lets the ESP8266 reject incomplete records.
 */
 
+if (wifiTxOffset < wifiTxLength) return;
+wifiTxLength = 0;
+wifiTxOffset = 0;
 digitalWrite(13,!digitalRead(13));//blink led every time we fire this interrrupt.
 
 int throttle_percent = 0;
@@ -395,48 +452,48 @@ if (ThrotRange > 0) {
     0, 100);
 }
 
-Serial2.print("@v="); Serial2.print(Sensor.Voltage);
-Serial2.print(";i="); Serial2.print(Sensor.Amperes);
-Serial2.print(";p="); Serial2.print(Sensor.KW);
-Serial2.print(";m="); Serial2.print(abs(mg1_speed));
-Serial2.print(";n="); Serial2.print(abs(mg2_speed));
-Serial2.print(";o="); Serial2.print(mg1_stat, 1);
-Serial2.print(";r="); Serial2.print(mg2_stat, 1);
-Serial2.print(";q="); Serial2.print(parameters.PumpPWM); // legacy field: oil-pump PWM command (%)
-Serial2.print(";iw="); Serial2.print(temp_inv_water);
-Serial2.print(";il="); Serial2.print(temp_inv_inductor);
+appendWifiText("@v="); appendWifiFloat(Sensor.Voltage, 2);
+appendWifiText(";i="); appendWifiFloat(Sensor.Amperes, 2);
+appendWifiText(";p="); appendWifiFloat(Sensor.KW, 2);
+appendWifiText(";m="); appendWifiInt(abs(mg1_speed));
+appendWifiText(";n="); appendWifiInt(abs(mg2_speed));
+appendWifiText(";o="); appendWifiFloat(mg1_stat, 1);
+appendWifiText(";r="); appendWifiFloat(mg2_stat, 1);
+appendWifiText(";q="); appendWifiInt(parameters.PumpPWM); // legacy field: oil-pump PWM command (%)
+appendWifiText(";iw="); appendWifiFloat(temp_inv_water, 2);
+appendWifiText(";il="); appendWifiFloat(temp_inv_inductor, 2);
 float transmissionTemp = 0.0f;
 readThermistor(
   analogRead(TransTemp), transmissionThermistorProfile.resistanceAt25C,
   transmissionThermistorProfile.beta, transmissionThermistorProfile.pullupResistance,
   transmissionTemp);
-Serial2.print(";tt="); Serial2.print(transmissionTemp, 1);
+appendWifiText(";tt="); appendWifiFloat(transmissionTemp, 1);
 float oilPumpTemp = 0.0f;
 readThermistor(
   analogRead(OilpumpTemp), oilPumpThermistorProfile.resistanceAt25C,
   oilPumpThermistorProfile.beta, oilPumpThermistorProfile.pullupResistance,
   oilPumpTemp);
-Serial2.print(";ot="); Serial2.print(oilPumpTemp, 1);
-Serial2.print(";th="); Serial2.print(throttle_percent);
-Serial2.print(";brakeOut="); Serial2.print(digitalRead(Out1)); // Out1 brake-light output, not a pedal input
-Serial2.print(";gear="); Serial2.print(gear);
-Serial2.print(";sel="); Serial2.print(parameters.selGear ? 1 : 0);
-Serial2.print(";in1="); Serial2.print(digitalRead(IN1));
-Serial2.print(";in2="); Serial2.print(digitalRead(IN2));
-Serial2.print(";low="); Serial2.print(digitalRead(Low_In));
-Serial2.print(";sl1="); Serial2.print(digitalRead(TransSL1));
-Serial2.print(";sl2="); Serial2.print(digitalRead(TransSL2));
-Serial2.print(";sp="); Serial2.print(digitalRead(TransSP));
-Serial2.print(";pb1="); Serial2.print(digitalRead(TransPB1));
-Serial2.print(";pb2="); Serial2.print(digitalRead(TransPB2));
-Serial2.print(";pb3="); Serial2.print(digitalRead(TransPB3));
-Serial2.print(";inverterPower="); Serial2.print(digitalRead(InvPower));
-Serial2.print(";inverterRequest="); Serial2.print(digitalRead(pin_inv_req));
-Serial2.print(";oilPumpPower="); Serial2.print(digitalRead(OilPumpPower));
-Serial2.print(";md="); Serial2.print(mth_good ? 1 : 0);
-Serial2.print(";sf="); Serial2.print(shiftFault ? 1 : 0);
-Serial2.print(";is="); Serial2.print(inv_status);
-Serial2.println("*");
+appendWifiText(";ot="); appendWifiFloat(oilPumpTemp, 1);
+appendWifiText(";th="); appendWifiInt(throttle_percent);
+appendWifiText(";brakeOut="); appendWifiInt(digitalRead(Out1)); // Out1 brake-light output, not a pedal input
+appendWifiText(";gear="); appendWifiInt(gear);
+appendWifiText(";sel="); appendWifiInt(parameters.selGear ? 1 : 0);
+appendWifiText(";in1="); appendWifiInt(digitalRead(IN1));
+appendWifiText(";in2="); appendWifiInt(digitalRead(IN2));
+appendWifiText(";low="); appendWifiInt(digitalRead(Low_In));
+appendWifiText(";sl1="); appendWifiInt(digitalRead(TransSL1));
+appendWifiText(";sl2="); appendWifiInt(digitalRead(TransSL2));
+appendWifiText(";sp="); appendWifiInt(digitalRead(TransSP));
+appendWifiText(";pb1="); appendWifiInt(digitalRead(TransPB1));
+appendWifiText(";pb2="); appendWifiInt(digitalRead(TransPB2));
+appendWifiText(";pb3="); appendWifiInt(digitalRead(TransPB3));
+appendWifiText(";inverterPower="); appendWifiInt(digitalRead(InvPower));
+appendWifiText(";inverterRequest="); appendWifiInt(digitalRead(pin_inv_req));
+appendWifiText(";oilPumpPower="); appendWifiInt(digitalRead(OilPumpPower));
+appendWifiText(";md="); appendWifiInt(mth_good ? 1 : 0);
+appendWifiText(";sf="); appendWifiInt(shiftFault ? 1 : 0);
+appendWifiText(";is="); appendWifiInt(inv_status);
+appendWifiText("*\r\n");
 
 }
 
@@ -835,6 +892,7 @@ static const uint16_t UNLOAD_DWELL_MS = 100;
 static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
 static const uint16_t DOG_POSITION_CONFIRM_MS = 100;
 static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
+static const uint32_t MTH_HOLD_RESET_TIMEOUT_US = 250000;
 static const int16_t MG2_UPSHIFT_START = 6500; // begin so the dog is home by 7000
 static const int16_t MG2_UPSHIFT_HARD = 7000;
 static const int16_t MG2_DOWNSHIFT_RESULT = 3000;
@@ -1164,17 +1222,16 @@ void applyDrivetrainTorque(int16_t mapTorque)
   }
   if (!mthDataFresh() || !dogPositionKnown ||
       (int32_t)(now - startupDogReadyMs) < 0) {
-    if (shiftPhase != PHASE_IDLE && shiftPhase != PHASE_FAULT) {
-      shiftFault = true;
-      shiftPhase = PHASE_FAULT;
-    }
     mg1_torque = 0;
     mg2_torque = 0;
     slewMg1 = 0;
     slewMg2 = 0;
-    holdI = 0.0f;
-    roadFilt = 0.0f;
-    settledSinceMs = now;
+    if (last_mth_valid_us == 0 ||
+        (uint32_t)(micros() - last_mth_valid_us) > MTH_HOLD_RESET_TIMEOUT_US) {
+      holdI = 0.0f;
+      roadFilt = 0.0f;
+      settledSinceMs = now;
+    }
     slewMg1Dwelling = false;
     slewMg2Dwelling = false;
     updateBrakeLight();
@@ -1464,6 +1521,7 @@ Metro timer_diag = Metro(1100);
 void loop() {
 
   control_inverter();
+  service_wifi_tx();
   Frames100MS();
   //Frames200MS();
 
