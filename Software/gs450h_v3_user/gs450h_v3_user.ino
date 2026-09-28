@@ -851,6 +851,7 @@ enum ShiftPhase {
 
 static bool ratioIsLow = false;       // updated only after dog-position feedback confirms a shift
 static bool pendingLow = false;
+static int8_t startupDogCandidate = -1;
 static ShiftPhase shiftPhase = PHASE_IDLE;
 static uint32_t shiftStartedMs = 0;
 static uint32_t phaseMs = 0;
@@ -1030,18 +1031,20 @@ int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t
   return cur;
 }
 
-bool dogPositionMatches(bool lowGear)
+int8_t dogPositionState()
 {
   // WiFi UI shows high=OFF/ON/OFF and low=ON/OFF/OFF for PB1/PB2/PB3.
   bool pb1 = digitalRead(TransPB1);
   bool pb2 = digitalRead(TransPB2);
   bool pb3 = digitalRead(TransPB3);
-  return lowGear ? (pb1 && !pb2 && !pb3) : (!pb1 && pb2 && !pb3);
+  if (pb1 && !pb2 && !pb3) return 1;
+  if (!pb1 && pb2 && !pb3) return 0;
+  return -1;
 }
 
 bool dogPositionConfirmed(bool lowGear, uint32_t now)
 {
-  if (!dogPositionMatches(lowGear)) {
+  if (dogPositionState() != (lowGear ? 1 : 0)) {
     dogPositionSinceMs = 0;
     return false;
   }
@@ -1065,7 +1068,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     shiftFast = false;
     bool overspeed = iabs16(mg2_speed) >= MG2MAXSPEED;
     bool requestLow = overspeed ? false : wantLowDog();
-    if (requestLow != ratioIsLow || overspeed) {
+    if (requestLow != ratioIsLow) {
       pendingLow = requestLow;
       shiftFast = ratioIsLow && iabs16(mg2_speed) >= MG2_UPSHIFT_HARD;
       shiftPhase = PHASE_HANDOFF;
@@ -1143,8 +1146,17 @@ void applyDrivetrainTorque(int16_t mapTorque)
 {
   uint32_t now = millis();
   if (!dogPositionKnown && (int32_t)(now - startupDogReadyMs) >= 0) {
-    if (dogPositionConfirmed(false, now)) {
+    int8_t position = dogPositionState();
+    if (position < 0) {
+      startupDogCandidate = -1;
+      dogPositionSinceMs = 0;
+    } else if (startupDogCandidate != position) {
+      startupDogCandidate = position;
+      dogPositionSinceMs = now;
+    } else if ((now - dogPositionSinceMs) >= DOG_POSITION_CONFIRM_MS) {
+      ratioIsLow = position == 1;
       dogPositionKnown = true;
+      dogPositionSinceMs = 0;
     } else if ((int32_t)(now - startupDogTimeoutMs) >= 0) {
       shiftFault = true;
       shiftPhase = PHASE_FAULT;
