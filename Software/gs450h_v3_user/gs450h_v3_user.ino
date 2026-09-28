@@ -109,7 +109,9 @@ bool htm_sent=0,
 uint32_t last_mth_valid_us=0;
 uint8_t consecutive_mth_valid=0;
 uint32_t startupDogReadyMs=0;
+uint32_t startupDogTimeoutMs=0;
 bool shiftFault=false;
+bool dogPositionKnown=false;
 
 int oil_power=120; //oil pump pwm value
 
@@ -311,6 +313,7 @@ void setup() {
   digitalWrite(TransSL2,LOW);  //turn off at startup
   digitalWrite(TransSP,LOW);  //turn off at startup
   startupDogReadyMs=millis()+250;
+  startupDogTimeoutMs=millis()+1500;
   digitalWrite(InvPower,HIGH);  //turn on after selecting the default high dog state
 
   pinMode(IN1,INPUT); //Input 1
@@ -830,8 +833,8 @@ static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossin
 static const uint16_t LASH_DWELL_MS = 50;
 static const uint16_t UNLOAD_DWELL_MS = 100;
 static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
+static const uint16_t DOG_POSITION_CONFIRM_MS = 100;
 static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
-static const int16_t MG2_LOW_SPEED_RATIO_LIMIT = 500;
 static const int16_t MG2_UPSHIFT_START = 6500; // begin so the dog is home by 7000
 static const int16_t MG2_UPSHIFT_HARD = 7000;
 static const int16_t MG2_DOWNSHIFT_RESULT = 3000;
@@ -846,13 +849,12 @@ enum ShiftPhase {
   PHASE_FAULT
 };
 
-static bool ratioIsLow = false;       // startup commands high; this tracks the commanded dog state
+static bool ratioIsLow = false;       // updated only after dog-position feedback confirms a shift
 static bool pendingLow = false;
 static ShiftPhase shiftPhase = PHASE_IDLE;
 static uint32_t shiftStartedMs = 0;
 static uint32_t phaseMs = 0;
-static uint32_t retryAfterMs = 0;
-static int16_t mg2AtShift = 0;
+static uint32_t dogPositionSinceMs = 0;
 static bool shiftFast = false;
 static float holdI = 0.0f;
 static float roadFilt = 0.0f;
@@ -1028,20 +1030,26 @@ int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t
   return cur;
 }
 
-bool shiftConfirmed(uint32_t now)
+bool dogPositionMatches(bool lowGear)
 {
-  uint32_t elapsed = now - phaseMs;
-  int16_t spd = iabs16(mg2_speed);
-  int16_t before = iabs16(mg2AtShift);
-  if (before < MG2_LOW_SPEED_RATIO_LIMIT && spd < MG2_LOW_SPEED_RATIO_LIMIT)
-    return elapsed > 200;
-  float scale = pendingLow ? (MG2_RATIO_LOW / MG2_RATIO_HIGH) : (MG2_RATIO_HIGH / MG2_RATIO_LOW);
-  float expect = (float)before * scale;
-  float err = (float)spd - expect;
-  if (err < 0.0f) err = -err;
-  float tol = expect * 0.30f;
-  if (tol < 100.0f) tol = 100.0f;
-  return elapsed > 80 && err < tol;
+  // WiFi UI shows high=OFF/ON/OFF and low=ON/OFF/OFF for PB1/PB2/PB3.
+  bool pb1 = digitalRead(TransPB1);
+  bool pb2 = digitalRead(TransPB2);
+  bool pb3 = digitalRead(TransPB3);
+  return lowGear ? (pb1 && !pb2 && !pb3) : (!pb1 && pb2 && !pb3);
+}
+
+bool dogPositionConfirmed(bool lowGear, uint32_t now)
+{
+  if (!dogPositionMatches(lowGear)) {
+    dogPositionSinceMs = 0;
+    return false;
+  }
+  if (dogPositionSinceMs == 0) {
+    dogPositionSinceMs = now;
+    return false;
+  }
+  return (now - dogPositionSinceMs) >= DOG_POSITION_CONFIRM_MS;
 }
 
 void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
@@ -1057,8 +1065,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     shiftFast = false;
     bool overspeed = iabs16(mg2_speed) >= MG2MAXSPEED;
     bool requestLow = overspeed ? false : wantLowDog();
-    if ((requestLow != ratioIsLow || overspeed) &&
-        (int32_t)(now - retryAfterMs) >= 0) {
+    if (requestLow != ratioIsLow || overspeed) {
       pendingLow = requestLow;
       shiftFast = ratioIsLow && iabs16(mg2_speed) >= MG2_UPSHIFT_HARD;
       shiftPhase = PHASE_HANDOFF;
@@ -1099,7 +1106,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     if ((now - phaseMs) >= UNLOAD_DWELL_MS) {
       shiftPhase = PHASE_ACTUATE;
       phaseMs = now;
-      mg2AtShift = mg2_speed;
+      dogPositionSinceMs = 0;
       applyDog(pendingLow);
     }
   } else if (shiftPhase == PHASE_ACTUATE) {
@@ -1107,7 +1114,7 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     if ((now - phaseMs) > 40) shiftPhase = PHASE_CONFIRM;
   } else if (shiftPhase == PHASE_CONFIRM) {
     applyDog(pendingLow);
-    if (shiftConfirmed(now)) {
+    if (dogPositionConfirmed(pendingLow, now)) {
       ratioIsLow = pendingLow;
       shiftPhase = PHASE_RELOAD;
       phaseMs = now;
@@ -1135,7 +1142,16 @@ void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 void applyDrivetrainTorque(int16_t mapTorque)
 {
   uint32_t now = millis();
-  if (!mthDataFresh() || (int32_t)(now - startupDogReadyMs) < 0) {
+  if (!dogPositionKnown && (int32_t)(now - startupDogReadyMs) >= 0) {
+    if (dogPositionConfirmed(false, now)) {
+      dogPositionKnown = true;
+    } else if ((int32_t)(now - startupDogTimeoutMs) >= 0) {
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+    }
+  }
+  if (!mthDataFresh() || !dogPositionKnown ||
+      (int32_t)(now - startupDogReadyMs) < 0) {
     if (shiftPhase != PHASE_IDLE && shiftPhase != PHASE_FAULT) {
       shiftFault = true;
       shiftPhase = PHASE_FAULT;
