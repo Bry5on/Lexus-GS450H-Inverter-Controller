@@ -880,10 +880,11 @@ static const float MG2_RATIO_HIGH = 1.9f;
 static const float MG1_PER_OUT = 1.25f;
 
 static const int16_t ONE_PEDAL_PEDAL = 12;     // percent, closed-pedal zone
-static const int16_t ONE_PEDAL_FULL = 80;      // full hold below this high-gear rpm
-static const int16_t ONE_PEDAL_FADE = 220;     // pedal map alone above this
-static const int16_t HOLD_DEADBAND = 30;       // freeze the hold inside this
-static const int16_t HOLD_RELEASE = 70;        // unwind only after the car is driven this far
+static const int16_t ONE_PEDAL_FULL = 260;     // full hold below ~3 mph
+static const int16_t ONE_PEDAL_FADE = 450;     // pedal map alone above ~5 mph
+static const int16_t HOLD_DEADBAND = 12;       // freeze only when the car is actually stopped
+static const int16_t HOLD_RELEASE = 90;        // unwind only if the hold itself drives the car
+static const int16_t HOLD_CREEP = 130;         // a steady roll below this always builds torque
 static const float HOLD_RAMP_UP = 12.0f;       // counts per 10 ms while rolling against the hold
 static const float HOLD_RAMP_DOWN = 4.0f;      // counts per 10 ms when unloading an overshoot
 static const int16_t HOLD_CLAMP = 1600;
@@ -1044,17 +1045,16 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     blend = ((float)ONE_PEDAL_FADE - av) / ((float)ONE_PEDAL_FADE - (float)ONE_PEDAL_FULL);
   }
 
-  // No proportional term. It was reversing through the gear lash every time
-  // speed twitched. The grade torque only ramps, and only while the car is
-  // actually rolling against it.
+  // 1 mph is about 90 MG2 rpm, so a visible creep used to sit above the hold
+  // band (torque decayed) or inside the freeze (torque never increased).
   static float prevRoad = 0.0f;
   float dv = roadFilt - prevRoad;
   prevRoad = roadFilt;
   bool slowing = (roadFilt * dv) < -0.5f;
-  if (av > (float)ONE_PEDAL_FULL) {
+  if (av > (float)ONE_PEDAL_FADE) {
     holdI *= 0.85f;
   } else if (av <= (float)HOLD_DEADBAND) {
-    // Sitting still. Keep the lash loaded.
+    // Actually stopped. Keep the lash loaded.
   } else if (holdI * roadFilt > 0.0f && av >= (float)HOLD_RELEASE) {
     if (holdI > 0.0f) {
       holdI -= HOLD_RAMP_DOWN;
@@ -1065,7 +1065,7 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     }
   } else if (holdI * roadFilt > 0.0f) {
     // Small overshoot. Leave the torque alone so the lash stays taken up.
-  } else if (!slowing) {
+  } else if (av <= (float)HOLD_CREEP || !slowing) {
     holdI += roadFilt < 0.0f ? HOLD_RAMP_UP : -HOLD_RAMP_UP;
   }
   if (holdI > (float)HOLD_CLAMP) holdI = (float)HOLD_CLAMP;
