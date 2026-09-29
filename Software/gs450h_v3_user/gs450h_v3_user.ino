@@ -882,6 +882,7 @@ static const float MG1_PER_OUT = 1.25f;
 static const int16_t ONE_PEDAL_PEDAL = 12;     // percent, closed-pedal zone
 static const int16_t ONE_PEDAL_FULL = 80;      // full hold below this high-gear rpm
 static const int16_t ONE_PEDAL_FADE = 220;     // pedal map alone above this
+static const int16_t HOLD_DEADBAND = 15;       // ignore speed noise inside this
 static const float HOLD_KP = 8.0f;             // counts per high-gear rpm
 static const float HOLD_KI = 12.0f;            // counts per high-gear rpm per second, hold band only
 static const int16_t HOLD_CLAMP = 1600;
@@ -1046,7 +1047,9 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
   // rolling arrives at the stop with a full regen command and drives backward.
   if (av > (float)ONE_PEDAL_FULL) {
     holdI *= 0.85f;
-  } else if (holdI * roadFilt > 0.0f && av > 8.0f) {
+  } else if (av <= (float)HOLD_DEADBAND) {
+    // Sitting still. Keep the grade torque, but do not chase speed noise.
+  } else if (holdI * roadFilt > 0.0f) {
     holdI *= 0.80f;
   } else {
     holdI += HOLD_KI * (0.0f - roadFilt) * 0.01f;
@@ -1057,7 +1060,8 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 
   if (blend <= 0.0f) return;
 
-  float t = (-HOLD_KP * roadFilt) + holdI;
+  float sensed = av <= (float)HOLD_DEADBAND ? 0.0f : roadFilt;
+  float t = (-HOLD_KP * sensed) + holdI;
   if (t > (float)HOLD_CLAMP) t = (float)HOLD_CLAMP;
   if (t < (float)-HOLD_CLAMP) t = (float)-HOLD_CLAMP;
   int16_t mg1Hold = mg1FromOut((int16_t)t);
@@ -1065,7 +1069,7 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
   tgt2 = (int16_t)((1.0f - blend) * (float)tgt2);
 }
 
-int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t target, uint32_t now, int16_t step, bool dwellOnCross)
+int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t target, uint32_t now, int16_t step)
 {
   if (dwelling) {
     if ((int32_t)(now - dwellUntil) < 0) return value;
@@ -1073,7 +1077,7 @@ int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t
   }
   int16_t cur = value;
   if (cur == target) return cur;
-  bool cross = dwellOnCross && ((cur > 0 && target < 0) || (cur < 0 && target > 0));
+  bool cross = (cur > 0 && target < 0) || (cur < 0 && target > 0);
   if (cross) {
     int16_t zstep = shiftFast ? (int16_t)(SLEW_STEP_ZERO * 3) : SLEW_STEP_ZERO;
     if (cur > 0) cur = cur > zstep ? (int16_t)(cur - zstep) : 0;
@@ -1283,9 +1287,8 @@ void applyDrivetrainTorque(int16_t mapTorque)
   serviceShift(tgt1, tgt2, now);
 
   int16_t step = shiftFast ? (int16_t)(SLEW_STEP * 3) : SLEW_STEP;
-  bool dwell = shiftPhase != PHASE_IDLE;
-  mg1_torque = slewToward(slewMg1, slewMg1Dwelling, slewMg1Until, tgt1, now, step, dwell);
-  mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, step, dwell);
+  mg1_torque = slewToward(slewMg1, slewMg1Dwelling, slewMg1Until, tgt1, now, step);
+  mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, step);
   if (iabs16(mg2_speed) >= MG2MAXSPEED) {
     mg2_torque = 0;
     slewMg2 = 0;
