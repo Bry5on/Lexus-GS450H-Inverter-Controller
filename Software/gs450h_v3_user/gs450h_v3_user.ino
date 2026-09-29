@@ -186,11 +186,11 @@ int16_t pedalmap_drive[11][6] = {     //torque 0-3500 (full scale for MG2)
 
 /////Pedal Map - Reverse/////
 int16_t pedalmap_reverse[5][6] = { //torque 0-3500 (full scale for MG2)
-{700,   525,  350,  175,  87,   0},
-{350,   70,   -210,   -490,   -770,   -1050},
-{0,   -350,   -700,  -1050,  -1400,  -1750},
-{0,   -350,   -700,  -1050,  -1400,  -1750},
-{0,   -350,   -700,  -1050,  -1400,  -1750}};
+{1400,  1050,  700,  350,  174,  0},
+{700,   140,  -420,  -980,  -1540,  -2100},
+{0,   -700,  -1400,  -2100,  -2800,  -3500},
+{0,   -700,  -1400,  -2100,  -2800,  -3500},
+{0,   -700,  -1400,  -2100,  -2800,  -3500}};
 
 int16_t speedrange_drive[11] = //rpm
 {-3500, 	-1750, 	0, 	900, 	3500, 	5250, 	7000, 	8750, 	10500, 	12250, 	14000}; // speed index 3 being different works with forcing speed index to 3 below
@@ -213,7 +213,7 @@ typedef struct
 
 ControlParams parameters;
 
-// Draft: one-pedal hold on MG1, MG2 regen scaled by the 2-speed, and a latched dog shift.
+// MG2 regen scaled by the 2-speed, and a latched dog shift.
 void applyDrivetrainTorque(int16_t mapTorque);
 void updateBrakeLight();
 
@@ -876,19 +876,8 @@ void applyDog(bool lowGear)
 static const float MG2_RATIO_LOW = 3.9f;
 static const float MG2_RATIO_HIGH = 1.9f;
 // Draft equivalence: 1 high-gear MG2 count ≈ this many MG1 counts at the wheels.
-// The old 5/4 splitter is only a starting guess. Calibrate before trusting the hold.
 static const float MG1_PER_OUT = 1.25f;
 
-static const int16_t ONE_PEDAL_PEDAL = 12;     // percent, closed-pedal zone
-static const int16_t ONE_PEDAL_FULL = 260;     // full hold below ~3 mph
-static const int16_t ONE_PEDAL_FADE = 450;     // pedal map alone above ~5 mph
-static const int16_t HOLD_DEADBAND = 8;        // filtered rpm, about 0.1 mph
-static const int16_t HOLD_CREEP = 130;         // build the stop only below ~1.5 mph
-static const float HOLD_K = 0.10f;             // counts per filtered rpm each 10 ms
-static const float HOLD_STEP_MAX = 8.0f;       // counts per 10 ms
-static const int16_t HOLD_CLAMP = 1600;
-static const int16_t LASH_PRELOAD = 250;       // +MG2 counts, cancelled by -MG1
-static const uint16_t HOLD_SETTLE_MS = 500;    // stopped this long, then drop the pinch
 static const int16_t SLEW_STEP = 40;           // counts per 10 ms, same sign
 static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossing lash
 static const uint16_t LASH_DWELL_MS = 50;
@@ -897,7 +886,6 @@ static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
 static const uint16_t SHIFT_CONFIRM_TIMEOUT_MS = 4000;
 static const uint16_t DOG_POSITION_CONFIRM_MS = 100;
 static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
-static const uint32_t MTH_HOLD_RESET_TIMEOUT_US = 250000;
 static const int16_t MG2_UPSHIFT_START = 6500; // begin so the dog is home by 7000
 static const int16_t MG2_UPSHIFT_HARD = 7000;
 static const int16_t MG2_DOWNSHIFT_RESULT = 3000;
@@ -922,9 +910,6 @@ static uint32_t dogPositionSinceMs = 0;
 static bool shiftFast = false;
 static bool awaitNeutralRelease = false;
 static bool faultNeutralSeen = false;
-static float holdI = 0.0f;
-static float roadFilt = 0.0f;
-static uint32_t settledSinceMs = 0;
 static int16_t slewMg1 = 0;
 static bool slewMg1Dwelling = false;
 static uint32_t slewMg1Until = 0;
@@ -1009,86 +994,6 @@ void splitMapTorque(int16_t mapTorque, int16_t &mg1, int16_t &mg2)
   }
   mg1 = clamp16(mg1, -4375, 4375);
   mg2 = clamp16(mg2, -3500, 3500);
-}
-
-int pedalPercent()
-{
-  if (ThrotRange <= 0) return 0;
-  return (int)constrain(
-    map(ThrotVal, (int)parameters.Min_throttleVal, (int)parameters.Max_throttleVal, 0, 100),
-    0, 100);
-}
-
-float roadRpm()
-{
-  float v = (float)mg2_speed;
-  if (ratioIsLow) v *= (MG2_RATIO_HIGH / MG2_RATIO_LOW);
-  return v;
-}
-
-void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
-{
-  bool tracking = mth_good && shiftPhase != PHASE_ACTUATE && shiftPhase != PHASE_CONFIRM;
-  if (tracking) roadFilt += (roadRpm() - roadFilt) * 0.01f;
-
-  static float lashScale = 1.0f;
-  static uint32_t stoppedSince = 0;
-  static bool holdTiming = false;
-
-  bool coast = mth_good && gear == DRIVE && pedalPercent() <= ONE_PEDAL_PEDAL;
-  if (!coast) {
-    holdI *= 0.90f;
-    if (holdI > -1.0f && holdI < 1.0f) holdI = 0.0f;
-    lashScale = 1.0f;
-    holdTiming = false;
-    return;
-  }
-  if (!holdTiming) {
-    holdTiming = true;
-    stoppedSince = now;
-  }
-
-  float av = roadFilt < 0.0f ? -roadFilt : roadFilt;
-  float blend = 0.0f;
-  if (av <= (float)ONE_PEDAL_FULL) blend = 1.0f;
-  else if (av < (float)ONE_PEDAL_FADE) {
-    blend = ((float)ONE_PEDAL_FADE - av) / ((float)ONE_PEDAL_FADE - (float)ONE_PEDAL_FULL);
-  }
-
-  // The 5 Hz lash rock averages out of roadFilt. A roll that stays on one
-  // side does not, so the hold keeps changing until that average is near zero.
-  if (av > (float)ONE_PEDAL_FADE) {
-    holdI *= 0.85f;
-  } else if (av <= (float)HOLD_DEADBAND) {
-    // Stopped. Keep whatever torque got it there.
-  } else if (av <= (float)HOLD_CREEP) {
-    float step = -HOLD_K * roadFilt;
-    if (step > HOLD_STEP_MAX) step = HOLD_STEP_MAX;
-    if (step < -HOLD_STEP_MAX) step = -HOLD_STEP_MAX;
-    holdI += step;
-  }
-  if (holdI > (float)HOLD_CLAMP) holdI = (float)HOLD_CLAMP;
-  if (holdI < (float)-HOLD_CLAMP) holdI = (float)-HOLD_CLAMP;
-
-  if (av > (float)HOLD_DEADBAND) {
-    stoppedSince = now;
-    lashScale += 0.10f;
-    if (lashScale > 1.0f) lashScale = 1.0f;
-  } else if ((uint32_t)(now - stoppedSince) >= HOLD_SETTLE_MS) {
-    lashScale -= 0.02f;
-    if (lashScale < 0.0f) lashScale = 0.0f;
-  }
-
-  if (blend <= 0.0f) return;
-
-  // +MG2 and an equal -MG1 pinch the gear lash with no net wheel torque.
-  // After the car has been stopped, fade the pair and leave the grade on MG1.
-  int16_t mg2Pinch = (int16_t)((float)LASH_PRELOAD * lashScale + 0.5f);
-  int16_t mg1Pinch = (int16_t)(-mg1FromOut(outEquiv(mg2Pinch, ratioIsLow)));
-  int16_t mg1Hold = mg1FromOut((int16_t)holdI);
-  int16_t mg1Cmd = clamp16((int32_t)mg1Hold + (int32_t)mg1Pinch, -4375, 4375);
-  tgt1 = (int16_t)(((1.0f - blend) * (float)tgt1) + (blend * (float)mg1Cmd));
-  tgt2 = (int16_t)(((1.0f - blend) * (float)tgt2) + (blend * (float)mg2Pinch));
 }
 
 int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t target, uint32_t now, int16_t step)
@@ -1290,12 +1195,6 @@ void applyDrivetrainTorque(int16_t mapTorque)
     mg2_torque = 0;
     slewMg1 = 0;
     slewMg2 = 0;
-    if (last_mth_valid_us == 0 ||
-        (uint32_t)(micros() - last_mth_valid_us) > MTH_HOLD_RESET_TIMEOUT_US) {
-      holdI = 0.0f;
-      roadFilt = 0.0f;
-      settledSinceMs = now;
-    }
     slewMg1Dwelling = false;
     slewMg2Dwelling = false;
     updateBrakeLight();
@@ -1305,7 +1204,6 @@ void applyDrivetrainTorque(int16_t mapTorque)
   int16_t tgt1 = 0;
   int16_t tgt2 = 0;
   splitMapTorque(mapTorque, tgt1, tgt2);
-  serviceOnePedal(tgt1, tgt2, now);
   serviceShift(tgt1, tgt2, now);
 
   int16_t step = shiftFast ? (int16_t)(SLEW_STEP * 3) : SLEW_STEP;
@@ -1328,8 +1226,7 @@ void updateBrakeLight()
             (mg2_torque < -70 && mg2_speed > 0) ||
             (mg2_torque > 70 && mg2_speed < 0);
   }
-  bool closedPedal = ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64);
-  digitalWrite(Out1, (regen || closedPedal) ? HIGH : LOW);
+  digitalWrite(Out1, regen ? HIGH : LOW);
 }
 
 void changeGear()
