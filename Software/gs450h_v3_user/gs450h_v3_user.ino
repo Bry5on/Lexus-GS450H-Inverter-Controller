@@ -878,8 +878,9 @@ static const float MG2_RATIO_HIGH = 1.9f;
 // Draft equivalence: 1 high-gear MG2 count ≈ this many MG1 counts at the wheels.
 static const float MG1_PER_OUT = 1.25f;
 
-static const int16_t SLEW_STEP = 40;           // counts per 10 ms, same sign
-static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossing lash
+static const int16_t SLEW_STEP = 40;           // counts per 10 ms while shifting
+static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms across the lash
+static const int16_t LASH_BAND = 80;           // only this band is rate-limited
 static const uint16_t LASH_DWELL_MS = 50;
 static const uint16_t UNLOAD_DWELL_MS = 100;
 static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
@@ -1007,11 +1008,22 @@ int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t
   bool cross = (cur > 0 && target < 0) || (cur < 0 && target > 0);
   if (cross) {
     int16_t zstep = shiftFast ? (int16_t)(SLEW_STEP_ZERO * 3) : SLEW_STEP_ZERO;
-    if (cur > 0) cur = cur > zstep ? (int16_t)(cur - zstep) : 0;
-    else cur = cur < (int16_t)-zstep ? (int16_t)(cur + zstep) : 0;
-    if (cur == 0) {
-      dwelling = true;
-      dwellUntil = now + LASH_DWELL_MS;
+    if (cur > LASH_BAND || cur < (int16_t)-LASH_BAND) {
+      int16_t edge = cur > 0 ? LASH_BAND : (int16_t)-LASH_BAND;
+      if (cur > edge) {
+        int32_t next = (int32_t)cur - step;
+        cur = next < edge ? edge : (int16_t)next;
+      } else {
+        int32_t next = (int32_t)cur + step;
+        cur = next > edge ? edge : (int16_t)next;
+      }
+    } else {
+      if (cur > 0) cur = cur > zstep ? (int16_t)(cur - zstep) : 0;
+      else cur = cur < (int16_t)-zstep ? (int16_t)(cur + zstep) : 0;
+      if (cur == 0) {
+        dwelling = true;
+        dwellUntil = now + LASH_DWELL_MS;
+      }
     }
   } else if (target > cur) {
     int32_t next = (int32_t)cur + step;
@@ -1207,6 +1219,7 @@ void applyDrivetrainTorque(int16_t mapTorque)
   serviceShift(tgt1, tgt2, now);
 
   int16_t step = shiftFast ? (int16_t)(SLEW_STEP * 3) : SLEW_STEP;
+  if (shiftPhase == PHASE_IDLE) step = 4500; // follow the pedal; lash is the only pause
   mg1_torque = slewToward(slewMg1, slewMg1Dwelling, slewMg1Until, tgt1, now, step);
   mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, step);
   if (iabs16(mg2_speed) >= MG2MAXSPEED) {
