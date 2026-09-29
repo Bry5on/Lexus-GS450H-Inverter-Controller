@@ -882,7 +882,7 @@ static const float MG1_PER_OUT = 1.25f;
 static const int16_t ONE_PEDAL_PEDAL = 12;     // percent, closed-pedal zone
 static const int16_t ONE_PEDAL_FULL = 260;     // full hold below ~3 mph
 static const int16_t ONE_PEDAL_FADE = 450;     // pedal map alone above ~5 mph
-static const int16_t HOLD_DEADBAND = 12;       // freeze only when the car is actually stopped
+static const int16_t HOLD_DEADBAND = 25;       // freeze on the filtered speed, above the lash rock
 static const int16_t HOLD_RELEASE = 20;        // unload as soon as the hold starts the car moving
 static const int16_t HOLD_CREEP = 130;         // a steady roll below this always builds torque
 static const float HOLD_RAMP_UP = 12.0f;       // counts per 10 ms while rolling against the hold
@@ -1030,7 +1030,7 @@ float roadRpm()
 void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 {
   bool tracking = mth_good && shiftPhase != PHASE_ACTUATE && shiftPhase != PHASE_CONFIRM;
-  if (tracking) roadFilt += (roadRpm() - roadFilt) * 0.25f;
+  if (tracking) roadFilt += (roadRpm() - roadFilt) * 0.02f;
 
   static float lashScale = 1.0f;
   static uint32_t stoppedSince = 0;
