@@ -126,7 +126,7 @@ int maxDtorque=0, maxRtorque=0; //max torque values in variable form for math la
 int16_t torque = 0, smoothtorque = 0; //torque command mapped from -3500 to 3500 for inverter control
 
 /////////////throttle input smoothing variables///////////////
-const int numReadings = 20;
+const int numReadings = 15;
 int readings[numReadings];      // the readings from the analog input
 int readIndex = 0;              // the index of the current reading
 int total = 0;                  // the running total
@@ -1220,8 +1220,17 @@ void applyDrivetrainTorque(int16_t mapTorque)
 
   int16_t step = shiftFast ? (int16_t)(SLEW_STEP * 3) : SLEW_STEP;
   if (shiftPhase == PHASE_IDLE) step = 4500; // follow the pedal; lash is the only pause
+  int16_t mg2Step = step;
+  if (shiftPhase == PHASE_RELOAD) {
+    int16_t base = step;
+    int16_t dist = iabs16(tgt2);
+    if (dist < 1) dist = 1;
+    int frames = (dist + base - 1) / base + 20; // current ramp plus 200 ms
+    mg2Step = (int16_t)((dist + frames - 1) / frames);
+    if (mg2Step < 1) mg2Step = 1;
+  }
   mg1_torque = slewToward(slewMg1, slewMg1Dwelling, slewMg1Until, tgt1, now, step);
-  mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, step);
+  mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, mg2Step);
   if (iabs16(mg2_speed) >= MG2MAXSPEED) {
     mg2_torque = 0;
     slewMg2 = 0;
