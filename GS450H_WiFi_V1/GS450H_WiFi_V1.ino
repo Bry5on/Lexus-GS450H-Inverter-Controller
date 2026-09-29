@@ -249,9 +249,14 @@ void startNetwork() {
   }
 
   if (WiFi.status() != WL_CONNECTED) {
+    IPAddress apIP(192, 168, 2, 202);
+    IPAddress subnet(255, 255, 255, 0);
     WiFi.mode(WIFI_AP);
+    WiFi.softAPConfig(apIP, apIP, subnet);
     WiFi.softAP("GS450H-Inverter", GS450H_AP_PASSWORD);
-    Serial.println("Wi-Fi STA unavailable; started fallback AP");
+    WiFi.softAPConfig(apIP, apIP, subnet);
+    Serial.print("Wi-Fi STA unavailable; fallback AP at ");
+    Serial.println(WiFi.softAPIP());
   } else {
     Serial.print("Wi-Fi STA connected: ");
     Serial.println(WiFi.localIP());
