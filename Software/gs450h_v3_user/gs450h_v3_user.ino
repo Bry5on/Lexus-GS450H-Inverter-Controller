@@ -17,6 +17,7 @@
 //#include <DueTimer.h>  //https://github.com/collin80/DueTimer
 #include <Wire_EEPROM.h>
 #include <ISA.h>  //isa can shunt library
+#include <stdio.h>
 
 #define MG2MAXSPEED 10000
 #define pin_inv_req 22
@@ -106,6 +107,12 @@ byte inv_status=1,
 
 bool htm_sent=0,
      mth_good=0;
+uint32_t last_mth_valid_us=0;
+uint8_t consecutive_mth_valid=0;
+uint32_t startupDogReadyMs=0;
+uint32_t startupDogTimeoutMs=0;
+bool shiftFault=false;
+bool dogPositionKnown=false;
 
 int oil_power=120; //oil pump pwm value
 
@@ -179,11 +186,11 @@ int16_t pedalmap_drive[11][6] = {     //torque 0-3500 (full scale for MG2)
 
 /////Pedal Map - Reverse/////
 int16_t pedalmap_reverse[5][6] = { //torque 0-3500 (full scale for MG2)
-{700,   525,  350,  175,  87,   0},
-{350,   70,   -210,   -490,   -770,   -1050},
-{0,   -350,   -700,  -1050,  -1400,  -1750},
-{0,   -350,   -700,  -1050,  -1400,  -1750},
-{0,   -350,   -700,  -1050,  -1400,  -1750}};
+{1400,  1050,  700,  350,  174,  0},
+{700,   140,  -420,  -980,  -1540,  -2100},
+{0,   -700,  -1400,  -2100,  -2800,  -3500},
+{0,   -700,  -1400,  -2100,  -2800,  -3500},
+{0,   -700,  -1400,  -2100,  -2800,  -3500}};
 
 int16_t speedrange_drive[11] = //rpm
 {-3500, 	-1750, 	0, 	900, 	3500, 	5250, 	7000, 	8750, 	10500, 	12250, 	14000}; // speed index 3 being different works with forcing speed index to 3 below
@@ -205,6 +212,10 @@ typedef struct
 }ControlParams;
 
 ControlParams parameters;
+
+// MG2 regen scaled by the 2-speed, and a latched dog shift.
+void applyDrivetrainTorque(int16_t mapTorque);
+void updateBrakeLight();
 
 short get_torque()
 {
@@ -273,10 +284,6 @@ short get_torque()
     if (readIndex >= numReadings) readIndex = 0; // if we're at the end of the array...wrap around to the beginning
     
     smoothtorque = total / numReadings; // calculate the average of the torque commands
-    
-    if(smoothtorque < -70 && gear==DRIVE) digitalWrite(Out1,HIGH); //Set Out1 as brake light output during regen greater than normal engine coast, down to 3.75mph in jag
-    else if(ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64)) digitalWrite(Out1,HIGH); //Set Out1 as brake light output when throttle pedal is <1.5%
-    else digitalWrite(Out1,LOW); //turn off Out1 as brake light when not regenerating
     return smoothtorque; //return torque
 }
 
@@ -302,11 +309,13 @@ void setup() {
   pinMode(TransSL2,OUTPUT); //Trans solenoids
   pinMode(TransSP,OUTPUT); //Trans solenoids
 
-  digitalWrite(InvPower,HIGH);  //turn on at startup
   digitalWrite(Out1,LOW);  //turn off at startup
   digitalWrite(TransSL1,LOW);  //turn off at startup
   digitalWrite(TransSL2,LOW);  //turn off at startup
   digitalWrite(TransSP,LOW);  //turn off at startup
+  startupDogReadyMs=millis()+250;
+  startupDogTimeoutMs=millis()+1500;
+  digitalWrite(InvPower,HIGH);  //turn on after selecting the default high dog state
 
   pinMode(IN1,INPUT); //Input 1
   pinMode(IN2,INPUT); //Input 2
@@ -353,6 +362,59 @@ void setup() {
 
 }
 
+static char wifiTxBuffer[512];
+static size_t wifiTxLength = 0;
+static size_t wifiTxOffset = 0;
+
+void appendWifiText(const char* text)
+{
+  size_t remaining = sizeof(wifiTxBuffer) - wifiTxLength;
+  if (remaining == 0) return;
+  int written = snprintf(wifiTxBuffer + wifiTxLength, remaining, "%s", text);
+  if (written > 0) {
+    wifiTxLength += (size_t)written < remaining ? (size_t)written : remaining - 1;
+  }
+}
+
+void appendWifiInt(long value)
+{
+  char text[16];
+  snprintf(text, sizeof(text), "%ld", value);
+  appendWifiText(text);
+}
+
+void appendWifiFloat(float value, uint8_t decimalPlaces)
+{
+  long scale = decimalPlaces == 1 ? 10L : 100L;
+  long scaled = (long)(value * (float)scale + (value >= 0.0f ? 0.5f : -0.5f));
+  long whole = scaled / scale;
+  long fraction = scaled % scale;
+  if (scaled < 0) appendWifiText("-");
+  if (whole < 0) whole = -whole;
+  if (fraction < 0) fraction = -fraction;
+  appendWifiInt(whole);
+  appendWifiText(".");
+  char text[4];
+  snprintf(text, sizeof(text), decimalPlaces == 1 ? "%01ld" : "%02ld", fraction);
+  appendWifiText(text);
+}
+
+void service_wifi_tx()
+{
+  if (wifiTxOffset >= wifiTxLength) return;
+  int available = Serial2.availableForWrite();
+  if (available <= 0) return;
+  size_t remaining = wifiTxLength - wifiTxOffset;
+  size_t count = remaining < (size_t)available ? remaining : (size_t)available;
+  size_t written = Serial2.write(
+    (const uint8_t*)wifiTxBuffer + wifiTxOffset, count);
+  wifiTxOffset += written;
+  if (wifiTxOffset >= wifiTxLength) {
+    wifiTxOffset = 0;
+    wifiTxLength = 0;
+  }
+}
+
 void handle_wifi(){
 /*
  *
@@ -378,6 +440,9 @@ The remaining fields are read-only diagnostics. A newline after the frame
 lets the ESP8266 reject incomplete records.
 */
 
+if (wifiTxOffset < wifiTxLength) return;
+wifiTxLength = 0;
+wifiTxOffset = 0;
 digitalWrite(13,!digitalRead(13));//blink led every time we fire this interrrupt.
 
 int throttle_percent = 0;
@@ -387,47 +452,48 @@ if (ThrotRange > 0) {
     0, 100);
 }
 
-Serial2.print("@v="); Serial2.print(Sensor.Voltage);
-Serial2.print(";i="); Serial2.print(Sensor.Amperes);
-Serial2.print(";p="); Serial2.print(Sensor.KW);
-Serial2.print(";m="); Serial2.print(abs(mg1_speed));
-Serial2.print(";n="); Serial2.print(abs(mg2_speed));
-Serial2.print(";o="); Serial2.print(mg1_stat, 1);
-Serial2.print(";r="); Serial2.print(mg2_stat, 1);
-Serial2.print(";q="); Serial2.print(parameters.PumpPWM); // legacy field: oil-pump PWM command (%)
-Serial2.print(";iw="); Serial2.print(temp_inv_water);
-Serial2.print(";il="); Serial2.print(temp_inv_inductor);
+appendWifiText("@v="); appendWifiFloat(Sensor.Voltage, 2);
+appendWifiText(";i="); appendWifiFloat(Sensor.Amperes, 2);
+appendWifiText(";p="); appendWifiFloat(Sensor.KW, 2);
+appendWifiText(";m="); appendWifiInt(abs(mg1_speed));
+appendWifiText(";n="); appendWifiInt(abs(mg2_speed));
+appendWifiText(";o="); appendWifiFloat(mg1_stat, 1);
+appendWifiText(";r="); appendWifiFloat(mg2_stat, 1);
+appendWifiText(";q="); appendWifiInt(parameters.PumpPWM); // legacy field: oil-pump PWM command (%)
+appendWifiText(";iw="); appendWifiFloat(temp_inv_water, 2);
+appendWifiText(";il="); appendWifiFloat(temp_inv_inductor, 2);
 float transmissionTemp = 0.0f;
 readThermistor(
   analogRead(TransTemp), transmissionThermistorProfile.resistanceAt25C,
   transmissionThermistorProfile.beta, transmissionThermistorProfile.pullupResistance,
   transmissionTemp);
-Serial2.print(";tt="); Serial2.print(transmissionTemp, 1);
+appendWifiText(";tt="); appendWifiFloat(transmissionTemp, 1);
 float oilPumpTemp = 0.0f;
 readThermistor(
   analogRead(OilpumpTemp), oilPumpThermistorProfile.resistanceAt25C,
   oilPumpThermistorProfile.beta, oilPumpThermistorProfile.pullupResistance,
   oilPumpTemp);
-Serial2.print(";ot="); Serial2.print(oilPumpTemp, 1);
-Serial2.print(";th="); Serial2.print(throttle_percent);
-Serial2.print(";brakeOut="); Serial2.print(digitalRead(Out1)); // Out1 brake-light output, not a pedal input
-Serial2.print(";gear="); Serial2.print(gear);
-Serial2.print(";sel="); Serial2.print(parameters.selGear ? 1 : 0);
-Serial2.print(";in1="); Serial2.print(digitalRead(IN1));
-Serial2.print(";in2="); Serial2.print(digitalRead(IN2));
-Serial2.print(";low="); Serial2.print(digitalRead(Low_In));
-Serial2.print(";sl1="); Serial2.print(digitalRead(TransSL1));
-Serial2.print(";sl2="); Serial2.print(digitalRead(TransSL2));
-Serial2.print(";sp="); Serial2.print(digitalRead(TransSP));
-Serial2.print(";pb1="); Serial2.print(digitalRead(TransPB1));
-Serial2.print(";pb2="); Serial2.print(digitalRead(TransPB2));
-Serial2.print(";pb3="); Serial2.print(digitalRead(TransPB3));
-Serial2.print(";inverterPower="); Serial2.print(digitalRead(InvPower));
-Serial2.print(";inverterRequest="); Serial2.print(digitalRead(pin_inv_req));
-Serial2.print(";oilPumpPower="); Serial2.print(digitalRead(OilPumpPower));
-Serial2.print(";md="); Serial2.print(mth_good ? 1 : 0);
-Serial2.print(";is="); Serial2.print(inv_status);
-Serial2.println("*");
+appendWifiText(";ot="); appendWifiFloat(oilPumpTemp, 1);
+appendWifiText(";th="); appendWifiInt(throttle_percent);
+appendWifiText(";brakeOut="); appendWifiInt(digitalRead(Out1)); // Out1 brake-light output, not a pedal input
+appendWifiText(";gear="); appendWifiInt(gear);
+appendWifiText(";sel="); appendWifiInt(parameters.selGear ? 1 : 0);
+appendWifiText(";in1="); appendWifiInt(digitalRead(IN1));
+appendWifiText(";in2="); appendWifiInt(digitalRead(IN2));
+appendWifiText(";low="); appendWifiInt(digitalRead(Low_In));
+appendWifiText(";sl1="); appendWifiInt(digitalRead(TransSL1));
+appendWifiText(";sl2="); appendWifiInt(digitalRead(TransSL2));
+appendWifiText(";sp="); appendWifiInt(digitalRead(TransSP));
+appendWifiText(";pb1="); appendWifiInt(digitalRead(TransPB1));
+appendWifiText(";pb2="); appendWifiInt(digitalRead(TransPB2));
+appendWifiText(";pb3="); appendWifiInt(digitalRead(TransPB3));
+appendWifiText(";inverterPower="); appendWifiInt(digitalRead(InvPower));
+appendWifiText(";inverterRequest="); appendWifiInt(digitalRead(pin_inv_req));
+appendWifiText(";oilPumpPower="); appendWifiInt(digitalRead(OilPumpPower));
+appendWifiText(";md="); appendWifiInt(mth_good ? 1 : 0);
+appendWifiText(";sf="); appendWifiInt(shiftFault ? 1 : 0);
+appendWifiText(";is="); appendWifiInt(inv_status);
+appendWifiText("*\r\n");
 
 }
 
@@ -449,49 +515,7 @@ void control_inverter() {
       mg2_speed=mth_data[31]|mth_data[32]<<8;
     }
     gear=get_gear();
-    mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
-    //mg1_torque=((mg2_torque*5)/4);
-    if(mg2_torque>0) { //If we're driving forward, split torque to use mg2 first, then mg1 when necessary. Optimized for high gear
-      if (mg2_torque < 700) { //up to 20% throttle input
-        mg2_torque = mg2_torque*5/2; //use up to 50% of mg2 available torque
-        mg1_torque = 0;
-      }
-      else if (mg2_torque < 1750) { //from 20-50% throttle input
-        mg1_torque = (mg2_torque-700)*25/12;//*5/2*5/6; //use up to 50% mg1 available torque
-        mg2_torque = 1750; //use exactly 50% mg2 available torque
-      }
-      else { //ramp both motors up equally from 50%
-        mg1_torque=((mg2_torque*5)/4);
-      }
-    }
-    /*if(mg2_torque>0) { //If we're driving forward, split torque to use mg1 first, then mg2 when necessary. Optimized for high gear
-      if (mg2_torque < 1050) { //up to 30% throttle input
-        mg1_torque = mg2_torque*25/12; //use up to 50% of mg1 available torque
-        mg2_torque = 0; //use no torque from mg2, this will allow shifting
-      }
-      else if (mg2_torque < 1750) { //from 30-50% throttle input
-        mg2_torque = (mg2_torque-1050)*5/2; //use up to 50% mg2 available torque
-        mg1_torque = 1750*5/4; //use exactly 50% mg1 available torque
-      }
-      else { //ramp both motors up equally from 50% throttle
-        mg1_torque=((mg2_torque*5)/4);
-      }
-    }*/
-    else if (mg2_torque<0 && gear==3) { //For regen when in drive (3), use only mg1 for consistent behavior under regen regardless of gear choice
-      if (mg2_torque<-2100) { //prevent maxing out of mg1, cap the output - 4375 mg1 max, load share
-        mg1_torque = mg2_torque*5/4; //leaves mg2 set as normal for load sharing
-      }
-      else {
-        mg1_torque = mg2_torque*25/12; // use mg1 for all torque, up to max of 4375 from if statement above
-        mg2_torque = 0; //set mg2 to no torque
-      }
-    }
-    else { //catch all, this should only be active at 0 torque and in reverse while accelerating
-      //mg2_torque=get_torque(); // -3500 (reverse) to 3500 (forward)
-      mg1_torque=((mg2_torque*5)/4);
-    }
-    if((mg2_speed>MG2MAXSPEED)||(mg2_speed<-MG2MAXSPEED)) mg2_torque=0;
-    //if(gear==REVERSE)mg1_torque=0;
+    applyDrivetrainTorque(get_torque());
 
     //speed feedback
     speedSum=mg2_speed+mg1_speed;
@@ -526,12 +550,25 @@ void control_inverter() {
     htm_sent=0;
     mth_byte=0;
     mth_checksum=0;
+    bool mth_frame_overflow=false;
 
     for(int i=0;i<100;i++)mth_data[i]=0;
-    while(Serial1.available()){mth_data[mth_byte]=Serial1.read();mth_byte++;}
+    while(Serial1.available()) {
+      byte incoming=Serial1.read();
+      if(mth_byte<sizeof(mth_data))mth_data[mth_byte++]=incoming;
+      else mth_frame_overflow=true;
+    }
 
     for(int i=0;i<98;i++)mth_checksum+=mth_data[i];
-    if(mth_checksum==(mth_data[98]|(mth_data[99]<<8)))mth_good=1;else mth_good=0;
+    if(!mth_frame_overflow && mth_byte==sizeof(mth_data) &&
+       mth_checksum==(mth_data[98]|(mth_data[99]<<8))) {
+      mth_good=1;
+      last_mth_valid_us=micros();
+      if (consecutive_mth_valid < 3) consecutive_mth_valid++;
+    } else {
+      mth_good=0;
+      consecutive_mth_valid=0;
+    }
     last_packet=micros();
     digitalWrite(pin_inv_req,0);
   }
@@ -822,45 +859,404 @@ void SetPumpSpeed()
   SerialDEBUG.println(parameters.PumpPWM);
 }
 
-void changeGear()
+void applyDog(bool lowGear)
 {
-  if (mg2_speed<100 && mg1_speed<100) //only shift at very low rpm (ideally 0 but leave a little play)
-  {
-  
-    if(digitalRead(Low_In)) //shift to low gear on command at ~0 speed regardless of above setting
-    {
-      digitalWrite(TransSL1,HIGH);
-      digitalWrite(TransSL2,HIGH);
-      digitalWrite(TransSP,LOW);
-    }
-    else if(parameters.selGear)    //interface setting is in high gear, select high gear if the shifter isn't already selecting low gear
-    {
-      digitalWrite(TransSL1,LOW);
-      digitalWrite(TransSL2,LOW);
-      digitalWrite(TransSP,LOW);    //yes we are leaving them all off for initial proof of this version.
-    }
-  
-    if(!parameters.selGear)   //interface setting is in low gear, select low gear no matter what
-    {
-      digitalWrite(TransSL1,HIGH);
-      digitalWrite(TransSL2,HIGH);
-      digitalWrite(TransSP,LOW);
-    }
-  }
-  else if(!digitalRead(Low_In) && parameters.selGear && abs(mg2_torque) < 40) //shift into high gear at low mg2 torque when shifter is in high and interface setting is in high
-  {
-    digitalWrite(TransSL1,LOW);
-    digitalWrite(TransSL2,LOW);
-    digitalWrite(TransSP,LOW);
-  }
-  else if(digitalRead(Low_In) && abs(mg2_torque) < 40) //shift into low gear at low mg2 torque when shifter is in low
-  {
-    digitalWrite(TransSL1,HIGH);
-    digitalWrite(TransSL2,HIGH);
-    digitalWrite(TransSP,LOW);
+  if (lowGear) {
+    digitalWrite(TransSL1, HIGH);
+    digitalWrite(TransSL2, HIGH);
+    digitalWrite(TransSP, LOW);
+  } else {
+    digitalWrite(TransSL1, LOW);
+    digitalWrite(TransSL2, LOW);
+    digitalWrite(TransSP, LOW);
   }
 }
 
+// MG2 reduction. Low puts 2.05x the wheel torque on the same MG2 count.
+static const float MG2_RATIO_LOW = 3.9f;
+static const float MG2_RATIO_HIGH = 1.9f;
+// Draft equivalence: 1 high-gear MG2 count ≈ this many MG1 counts at the wheels.
+static const float MG1_PER_OUT = 1.25f;
+
+static const int16_t SLEW_STEP = 40;           // counts per 10 ms while shifting
+static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms across the lash
+static const int16_t LASH_BAND = 80;           // only this band is rate-limited
+static const uint16_t LASH_DWELL_MS = 50;
+static const uint16_t UNLOAD_DWELL_MS = 100;
+static const uint16_t SHIFT_HANDOFF_TIMEOUT_MS = 1200;
+static const uint16_t SHIFT_CONFIRM_TIMEOUT_MS = 4000;
+static const uint16_t DOG_POSITION_CONFIRM_MS = 100;
+static const uint16_t MTH_FRESH_TIMEOUT_US = 40000;
+static const int16_t MG2_UPSHIFT_START = 6500; // begin so the dog is home by 7000
+static const int16_t MG2_UPSHIFT_HARD = 7000;
+static const int16_t MG2_DOWNSHIFT_RESULT = 3000;
+
+enum ShiftPhase {
+  PHASE_IDLE = 0,
+  PHASE_HANDOFF,
+  PHASE_DWELL,
+  PHASE_ACTUATE,
+  PHASE_CONFIRM,
+  PHASE_RELOAD,
+  PHASE_FAULT
+};
+
+static bool ratioIsLow = false;       // updated only after dog-position feedback confirms a shift
+static bool pendingLow = false;
+static int8_t startupDogCandidate = -1;
+static ShiftPhase shiftPhase = PHASE_IDLE;
+static uint32_t shiftStartedMs = 0;
+static uint32_t phaseMs = 0;
+static uint32_t dogPositionSinceMs = 0;
+static bool shiftFast = false;
+static bool awaitNeutralRelease = false;
+static bool faultNeutralSeen = false;
+static int16_t slewMg1 = 0;
+static bool slewMg1Dwelling = false;
+static uint32_t slewMg1Until = 0;
+static int16_t slewMg2 = 0;
+static bool slewMg2Dwelling = false;
+static uint32_t slewMg2Until = 0;
+bool mthDataFresh()
+{
+  return consecutive_mth_valid >= 3 && last_mth_valid_us != 0 &&
+         (uint32_t)(micros() - last_mth_valid_us) <= MTH_FRESH_TIMEOUT_US;
+}
+
+int16_t iabs16(int16_t v)
+{
+  if (v == (-32767 - 1)) return 32767;
+  return v < 0 ? (int16_t)-v : v;
+}
+
+int16_t clamp16(int32_t v, int16_t lo, int16_t hi)
+{
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return (int16_t)v;
+}
+
+int16_t outEquiv(int16_t mg2Cmd, bool lowGear)
+{
+  if (!lowGear) return mg2Cmd;
+  return (int16_t)((float)mg2Cmd * (MG2_RATIO_LOW / MG2_RATIO_HIGH));
+}
+
+int16_t mg1FromOut(int32_t outCounts)
+{
+  return clamp16((int32_t)((float)outCounts * MG1_PER_OUT), -4375, 4375);
+}
+
+bool driverWantsLow()
+{
+  if (digitalRead(Low_In)) return true;
+  if (!parameters.selGear) return true;
+  return false;
+}
+
+// Low dog only when the driver asked for it and a downshift would land at <= 3000 MG2 rpm.
+// In low, leave by 6500 so the shift is finished before 7000.
+bool wantLowDog()
+{
+  int16_t spd = iabs16(mg2_speed);
+  if (!driverWantsLow()) return false;
+  if (ratioIsLow) return spd < MG2_UPSHIFT_START;
+  float predicted = (float)spd * (MG2_RATIO_LOW / MG2_RATIO_HIGH);
+  return predicted <= (float)MG2_DOWNSHIFT_RESULT;
+}
+
+void splitMapTorque(int16_t mapTorque, int16_t &mg1, int16_t &mg2)
+{
+  mg2 = mapTorque;
+  mg1 = 0;
+  if (mg2 > 0) {
+    if (mg2 < 700) {
+      mg2 = (int16_t)(mg2 * 5 / 2);
+      mg1 = 0;
+    } else if (mg2 < 1750) {
+      mg1 = (int16_t)((mg2 - 700) * 25 / 12);
+      mg2 = 1750;
+    } else {
+      mg1 = (int16_t)((mg2 * 5) / 4);
+    }
+  } else if (mg2 < 0 && gear == DRIVE) {
+    if (mg2 < -2100) {
+      mg1 = (int16_t)((mg2 * 5) / 4);
+    } else {
+      mg1 = (int16_t)((mg2 * 25) / 12);
+      mg2 = 0;
+    }
+  } else {
+    mg1 = (int16_t)((mg2 * 5) / 4);
+  }
+  // Same MG2 regen count is 2.05x harsher in low. Scale the command, not the drive torque.
+  if (ratioIsLow && mg2 < 0) {
+    mg2 = (int16_t)((float)mg2 * (MG2_RATIO_HIGH / MG2_RATIO_LOW));
+  }
+  mg1 = clamp16(mg1, -4375, 4375);
+  mg2 = clamp16(mg2, -3500, 3500);
+}
+
+int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t target, uint32_t now, int16_t step)
+{
+  if (dwelling) {
+    if ((int32_t)(now - dwellUntil) < 0) return value;
+    dwelling = false;
+  }
+  int16_t cur = value;
+  if (cur == target) return cur;
+  bool cross = (cur > 0 && target < 0) || (cur < 0 && target > 0);
+  if (cross) {
+    int16_t zstep = shiftFast ? (int16_t)(SLEW_STEP_ZERO * 3) : SLEW_STEP_ZERO;
+    if (cur > LASH_BAND || cur < (int16_t)-LASH_BAND) {
+      int16_t edge = cur > 0 ? LASH_BAND : (int16_t)-LASH_BAND;
+      if (cur > edge) {
+        int32_t next = (int32_t)cur - step;
+        cur = next < edge ? edge : (int16_t)next;
+      } else {
+        int32_t next = (int32_t)cur + step;
+        cur = next > edge ? edge : (int16_t)next;
+      }
+    } else {
+      if (cur > 0) cur = cur > zstep ? (int16_t)(cur - zstep) : 0;
+      else cur = cur < (int16_t)-zstep ? (int16_t)(cur + zstep) : 0;
+      if (cur == 0) {
+        dwelling = true;
+        dwellUntil = now + LASH_DWELL_MS;
+      }
+    }
+  } else if (target > cur) {
+    int32_t next = (int32_t)cur + step;
+    cur = next > target ? target : (int16_t)next;
+  } else {
+    int32_t next = (int32_t)cur - step;
+    cur = next < target ? target : (int16_t)next;
+  }
+  value = cur;
+  return cur;
+}
+
+int8_t dogPositionState()
+{
+  // WiFi UI shows high=OFF/ON/OFF and low=ON/OFF/OFF for PB1/PB2/PB3.
+  bool pb1 = digitalRead(TransPB1);
+  bool pb2 = digitalRead(TransPB2);
+  bool pb3 = digitalRead(TransPB3);
+  if (pb1 && !pb2 && !pb3) return 1;
+  if (!pb1 && pb2 && !pb3) return 0;
+  return -1;
+}
+
+bool dogPositionConfirmed(bool lowGear, uint32_t now)
+{
+  if (dogPositionState() != (lowGear ? 1 : 0)) {
+    dogPositionSinceMs = 0;
+    return false;
+  }
+  if (dogPositionSinceMs == 0) {
+    dogPositionSinceMs = now;
+    return false;
+  }
+  return (now - dogPositionSinceMs) >= DOG_POSITION_CONFIRM_MS;
+}
+
+void serviceShift(int16_t &tgt1, int16_t &tgt2, uint32_t now)
+{
+  if (shiftPhase == PHASE_FAULT) {
+    if (gear == NEUTRAL) {
+      if (!faultNeutralSeen) {
+        faultNeutralSeen = true;
+        dogPositionSinceMs = 0;
+      }
+      int8_t position = dogPositionState();
+      if (position < 0) dogPositionSinceMs = 0;
+      else if (dogPositionConfirmed(position == 1, now)) {
+        ratioIsLow = position == 1;
+        pendingLow = ratioIsLow;
+        shiftFault = false;
+        shiftPhase = PHASE_IDLE;
+        shiftFast = false;
+        dogPositionSinceMs = 0;
+        faultNeutralSeen = false;
+        awaitNeutralRelease = true;
+        applyDog(ratioIsLow);
+      } else {
+        applyDog(iabs16(mg2_speed) >= MG2MAXSPEED ? false : ratioIsLow);
+      }
+    } else {
+      faultNeutralSeen = false;
+      dogPositionSinceMs = 0;
+      applyDog(iabs16(mg2_speed) >= MG2MAXSPEED ? false : ratioIsLow);
+    }
+    tgt1 = 0;
+    tgt2 = 0;
+    return;
+  }
+
+  if (awaitNeutralRelease) {
+    if (gear == NEUTRAL) {
+      applyDog(ratioIsLow);
+      tgt1 = 0;
+      tgt2 = 0;
+      return;
+    }
+    awaitNeutralRelease = false;
+  }
+
+  if (shiftPhase == PHASE_IDLE) {
+    shiftFast = false;
+    bool overspeed = iabs16(mg2_speed) >= MG2MAXSPEED;
+    bool requestLow = overspeed ? false : wantLowDog();
+    if (requestLow != ratioIsLow) {
+      pendingLow = requestLow;
+      shiftFast = ratioIsLow && iabs16(mg2_speed) >= MG2_UPSHIFT_HARD;
+      shiftPhase = PHASE_HANDOFF;
+      shiftStartedMs = now;
+    }
+  }
+
+  if (shiftPhase == PHASE_IDLE) {
+    applyDog(ratioIsLow);
+    return;
+  }
+
+  int16_t driver1 = tgt1;
+  int16_t driver2 = tgt2;
+  int16_t appliedOut = outEquiv(slewMg2, ratioIsLow);
+  int16_t driverOut = outEquiv(driver2, ratioIsLow);
+
+  if (shiftPhase == PHASE_HANDOFF || shiftPhase == PHASE_DWELL ||
+      shiftPhase == PHASE_ACTUATE || shiftPhase == PHASE_CONFIRM) {
+    tgt2 = 0;
+    tgt1 = clamp16((int32_t)driver1 + (int32_t)mg1FromOut((int32_t)driverOut - (int32_t)appliedOut), -4375, 4375);
+    applyDog(ratioIsLow);
+  }
+
+  if (shiftPhase == PHASE_HANDOFF) {
+    if (iabs16(slewMg2) < 25) {
+      shiftPhase = PHASE_DWELL;
+      phaseMs = now;
+    } else if ((now - shiftStartedMs) > SHIFT_HANDOFF_TIMEOUT_MS) {
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+      applyDog(ratioIsLow);
+      tgt1 = 0;
+      tgt2 = 0;
+    }
+  } else if (shiftPhase == PHASE_DWELL) {
+    tgt2 = 0;
+    if ((now - phaseMs) >= UNLOAD_DWELL_MS) {
+      shiftPhase = PHASE_ACTUATE;
+      phaseMs = now;
+      dogPositionSinceMs = 0;
+      applyDog(pendingLow);
+    }
+  } else if (shiftPhase == PHASE_ACTUATE) {
+    applyDog(pendingLow);
+    if ((now - phaseMs) > 40) shiftPhase = PHASE_CONFIRM;
+  } else if (shiftPhase == PHASE_CONFIRM) {
+    applyDog(pendingLow);
+    if (dogPositionConfirmed(pendingLow, now)) {
+      ratioIsLow = pendingLow;
+      shiftPhase = PHASE_RELOAD;
+      phaseMs = now;
+    } else if ((now - phaseMs) > SHIFT_CONFIRM_TIMEOUT_MS) {
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+      applyDog(ratioIsLow);
+      tgt1 = 0;
+      tgt2 = 0;
+    }
+  } else if (shiftPhase == PHASE_RELOAD) {
+    int16_t reloadOut = outEquiv(driver2, ratioIsLow);
+    int16_t haveOut = outEquiv(slewMg2, ratioIsLow);
+    tgt2 = driver2;
+    tgt1 = clamp16((int32_t)driver1 + (int32_t)mg1FromOut((int32_t)reloadOut - (int32_t)haveOut), -4375, 4375);
+    applyDog(ratioIsLow);
+    if ((iabs16((int16_t)(slewMg2 - driver2)) < 30 &&
+         iabs16((int16_t)(slewMg1 - driver1)) < 40) ||
+        (now - phaseMs) > 1200) {
+      shiftPhase = PHASE_IDLE;
+    }
+  }
+}
+
+void applyDrivetrainTorque(int16_t mapTorque)
+{
+  uint32_t now = millis();
+  if (!dogPositionKnown && (int32_t)(now - startupDogReadyMs) >= 0) {
+    int8_t position = dogPositionState();
+    if (position < 0) {
+      startupDogCandidate = -1;
+      dogPositionSinceMs = 0;
+    } else if (startupDogCandidate != position) {
+      startupDogCandidate = position;
+      dogPositionSinceMs = now;
+    } else if ((now - dogPositionSinceMs) >= DOG_POSITION_CONFIRM_MS) {
+      ratioIsLow = position == 1;
+      dogPositionKnown = true;
+      dogPositionSinceMs = 0;
+    } else if ((int32_t)(now - startupDogTimeoutMs) >= 0) {
+      shiftFault = true;
+      shiftPhase = PHASE_FAULT;
+    }
+  }
+  if (!mthDataFresh() || !dogPositionKnown ||
+      (int32_t)(now - startupDogReadyMs) < 0) {
+    mg1_torque = 0;
+    mg2_torque = 0;
+    slewMg1 = 0;
+    slewMg2 = 0;
+    slewMg1Dwelling = false;
+    slewMg2Dwelling = false;
+    updateBrakeLight();
+    return;
+  }
+
+  int16_t tgt1 = 0;
+  int16_t tgt2 = 0;
+  splitMapTorque(mapTorque, tgt1, tgt2);
+  serviceShift(tgt1, tgt2, now);
+
+  int16_t step = shiftFast ? (int16_t)(SLEW_STEP * 3) : SLEW_STEP;
+  if (shiftPhase == PHASE_IDLE) step = 4500; // follow the pedal; lash is the only pause
+  int16_t mg2Step = step;
+  if (shiftPhase == PHASE_RELOAD) {
+    int16_t base = step;
+    int16_t dist = iabs16(tgt2);
+    if (dist < 1) dist = 1;
+    int frames = (dist + base - 1) / base + 20; // current ramp plus 200 ms
+    mg2Step = (int16_t)((dist + frames - 1) / frames);
+    if (mg2Step < 1) mg2Step = 1;
+  }
+  mg1_torque = slewToward(slewMg1, slewMg1Dwelling, slewMg1Until, tgt1, now, step);
+  mg2_torque = slewToward(slewMg2, slewMg2Dwelling, slewMg2Until, tgt2, now, mg2Step);
+  if (iabs16(mg2_speed) >= MG2MAXSPEED) {
+    mg2_torque = 0;
+    slewMg2 = 0;
+    slewMg2Dwelling = false;
+  }
+  updateBrakeLight();
+}
+
+void updateBrakeLight()
+{
+  bool regen = false;
+  if (gear == DRIVE && mthDataFresh()) {
+    regen = (mg1_torque < -70 && mg1_speed > 0) ||
+            (mg1_torque > 70 && mg1_speed < 0) ||
+            (mg2_torque < -70 && mg2_speed > 0) ||
+            (mg2_torque > 70 && mg2_speed < 0);
+  }
+  bool closedPedal = ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64);
+  digitalWrite(Out1, (regen || closedPedal) ? HIGH : LOW);
+}
+
+void changeGear()
+{
+  // Kept so older call sites still link. The dog is driven from applyDrivetrainTorque().
+  applyDog(ratioIsLow);
+}
 
 void processTemps()
 {
@@ -935,8 +1331,9 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
 {
   if(timer_Frames100.check())
   {
-    RPM=abs(mg1_speed) / 2.28; //output shaft rotational speed
+    RPM=abs(mg1_speed) / 2.28; // absolute shaft rpm, still used by the OBD speed
     vehicle_doublespeed = abs(mg1_speed) / 52; //mg1_speed is 1.2*mg2_speed, mg2_speed is 1.9*output shaft speed, mg1=2.28*output shaft, 4000rpm output shaft is 88mph. mg1*.009649 = ground speed, 1/.009649 = 103.63 (~104)
+    int16_t shaft_rpm = (int16_t)constrain((long)(mg1_speed / 2.28f), -32768L, 32767L);
     CoolantCAN = temp_inv_water;
     StatorCAN = high_stat;
     outframe.id = 0x0AA;            // Set our transmission address ID
@@ -947,8 +1344,8 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     outframe.data.bytes[1] = vehicle_doublespeed; //Two times the car's ground speed in mph * 2
     outframe.data.bytes[2] = StatorCAN; //higher of both stator temps in C. Gauge range 80 - 150C
     outframe.data.bytes[3] = CoolantCAN; //coolant temp in C. Gauge range 0 - 100C
-    outframe.data.bytes[4] = lowByte(RPM);
-    outframe.data.bytes[5] = highByte(RPM);
+    outframe.data.bytes[4] = lowByte((uint16_t)shaft_rpm);
+    outframe.data.bytes[5] = highByte((uint16_t)shaft_rpm);
     outframe.data.bytes[6] = (uint8_t)(fabsf(Sensor.Amperes) / 2.0f); // |A|/2, divide before uint8 (avoids wrap at 256A)
     outframe.data.bytes[7] = 0x00;
 
@@ -956,7 +1353,7 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     Can1.sendFrame(outframe);
 
     // 0x0AB — analog Serial2 fields not already packed in 0x0AA
-    // b0-1 Voltage*10 (V), b2-3 kW*10 signed, b4-5 |mg2| rpm,
+    // b0-1 Voltage*10 (V), b2-3 kW*10 signed, b4-5 mg2 rpm signed,
     // b6 throttle %, b7 oil-pump PWM %
     int throttle_percent = 0;
     if (ThrotRange > 0) {
@@ -978,7 +1375,7 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     {
       uint16_t v10 = (uint16_t)constrain((long)(Sensor.Voltage * 10.0f), 0L, 65535L);
       int16_t  p10 = (int16_t)constrain((long)(Sensor.KW * 10.0f), -32768L, 32767L);
-      uint16_t n_rpm = (uint16_t)constrain((long)abs(mg2_speed), 0L, 65535L);
+      int16_t n_rpm = (int16_t)constrain((long)mg2_speed, -32768L, 32767L);
       outframe.id = 0x0AB;
       outframe.length = 8;
       outframe.extended = 0;
@@ -987,8 +1384,8 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
       outframe.data.bytes[1] = highByte(v10);
       outframe.data.bytes[2] = lowByte((uint16_t)p10);
       outframe.data.bytes[3] = highByte((uint16_t)p10);
-      outframe.data.bytes[4] = lowByte(n_rpm);
-      outframe.data.bytes[5] = highByte(n_rpm);
+      outframe.data.bytes[4] = lowByte((uint16_t)n_rpm);
+      outframe.data.bytes[5] = highByte((uint16_t)n_rpm);
       outframe.data.bytes[6] = (uint8_t)constrain(throttle_percent, 0, 255);
       outframe.data.bytes[7] = (uint8_t)constrain(parameters.PumpPWM, 0, 255);
       Can0.sendFrame(outframe);
@@ -997,9 +1394,9 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
 
     // 0x0AC — remaining analog temps + full MG1 rpm (no inv_status)
     // b0 mg1 C, b1 mg2 C, b2 inductor C, b3 trans C, b4 oil-pump C,
-    // b5 gear, b6-7 |mg1| rpm LE
+    // b5 gear, b6-7 mg1 rpm signed LE
     {
-      uint16_t m_rpm = (uint16_t)constrain((long)abs(mg1_speed), 0L, 65535L);
+      int16_t m_rpm = (int16_t)constrain((long)mg1_speed, -32768L, 32767L);
       outframe.id = 0x0AC;
       outframe.length = 8;
       outframe.extended = 0;
@@ -1010,8 +1407,8 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
       outframe.data.bytes[3] = (uint8_t)constrain((int)(transmissionTemp + 0.5f), 0, 255);
       outframe.data.bytes[4] = (uint8_t)constrain((int)(oilPumpTemp + 0.5f), 0, 255);
       outframe.data.bytes[5] = (uint8_t)gear;
-      outframe.data.bytes[6] = lowByte(m_rpm);
-      outframe.data.bytes[7] = highByte(m_rpm);
+      outframe.data.bytes[6] = lowByte((uint16_t)m_rpm);
+      outframe.data.bytes[7] = highByte((uint16_t)m_rpm);
       Can0.sendFrame(outframe);
       Can1.sendFrame(outframe);
     }
@@ -1109,12 +1506,12 @@ Metro timer_diag = Metro(1100);
 void loop() {
 
   control_inverter();
+  service_wifi_tx();
   Frames100MS();
   //Frames200MS();
 
   if(timer_diag.check())
   {
-    changeGear();
     processTemps();
     handle_wifi();
     analogWrite(OilPumpPWM,map(parameters.PumpPWM, 0, 100, 0, 255)); //set oil pump pwm
