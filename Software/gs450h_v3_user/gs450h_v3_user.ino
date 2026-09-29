@@ -1423,8 +1423,9 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
 {
   if(timer_Frames100.check())
   {
-    RPM=abs(mg1_speed) / 2.28; //output shaft rotational speed
+    RPM=abs(mg1_speed) / 2.28; // absolute shaft rpm, still used by the OBD speed
     vehicle_doublespeed = abs(mg1_speed) / 52; //mg1_speed is 1.2*mg2_speed, mg2_speed is 1.9*output shaft speed, mg1=2.28*output shaft, 4000rpm output shaft is 88mph. mg1*.009649 = ground speed, 1/.009649 = 103.63 (~104)
+    int16_t shaft_rpm = (int16_t)constrain((long)(mg1_speed / 2.28f), -32768L, 32767L);
     CoolantCAN = temp_inv_water;
     StatorCAN = high_stat;
     outframe.id = 0x0AA;            // Set our transmission address ID
@@ -1435,8 +1436,8 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     outframe.data.bytes[1] = vehicle_doublespeed; //Two times the car's ground speed in mph * 2
     outframe.data.bytes[2] = StatorCAN; //higher of both stator temps in C. Gauge range 80 - 150C
     outframe.data.bytes[3] = CoolantCAN; //coolant temp in C. Gauge range 0 - 100C
-    outframe.data.bytes[4] = lowByte(RPM);
-    outframe.data.bytes[5] = highByte(RPM);
+    outframe.data.bytes[4] = lowByte((uint16_t)shaft_rpm);
+    outframe.data.bytes[5] = highByte((uint16_t)shaft_rpm);
     outframe.data.bytes[6] = (uint8_t)(fabsf(Sensor.Amperes) / 2.0f); // |A|/2, divide before uint8 (avoids wrap at 256A)
     outframe.data.bytes[7] = 0x00;
 
@@ -1444,7 +1445,7 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     Can1.sendFrame(outframe);
 
     // 0x0AB — analog Serial2 fields not already packed in 0x0AA
-    // b0-1 Voltage*10 (V), b2-3 kW*10 signed, b4-5 |mg2| rpm,
+    // b0-1 Voltage*10 (V), b2-3 kW*10 signed, b4-5 mg2 rpm signed,
     // b6 throttle %, b7 oil-pump PWM %
     int throttle_percent = 0;
     if (ThrotRange > 0) {
@@ -1466,7 +1467,7 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     {
       uint16_t v10 = (uint16_t)constrain((long)(Sensor.Voltage * 10.0f), 0L, 65535L);
       int16_t  p10 = (int16_t)constrain((long)(Sensor.KW * 10.0f), -32768L, 32767L);
-      uint16_t n_rpm = (uint16_t)constrain((long)abs(mg2_speed), 0L, 65535L);
+      int16_t n_rpm = (int16_t)constrain((long)mg2_speed, -32768L, 32767L);
       outframe.id = 0x0AB;
       outframe.length = 8;
       outframe.extended = 0;
@@ -1475,8 +1476,8 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
       outframe.data.bytes[1] = highByte(v10);
       outframe.data.bytes[2] = lowByte((uint16_t)p10);
       outframe.data.bytes[3] = highByte((uint16_t)p10);
-      outframe.data.bytes[4] = lowByte(n_rpm);
-      outframe.data.bytes[5] = highByte(n_rpm);
+      outframe.data.bytes[4] = lowByte((uint16_t)n_rpm);
+      outframe.data.bytes[5] = highByte((uint16_t)n_rpm);
       outframe.data.bytes[6] = (uint8_t)constrain(throttle_percent, 0, 255);
       outframe.data.bytes[7] = (uint8_t)constrain(parameters.PumpPWM, 0, 255);
       Can0.sendFrame(outframe);
@@ -1485,9 +1486,9 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
 
     // 0x0AC — remaining analog temps + full MG1 rpm (no inv_status)
     // b0 mg1 C, b1 mg2 C, b2 inductor C, b3 trans C, b4 oil-pump C,
-    // b5 gear, b6-7 |mg1| rpm LE
+    // b5 gear, b6-7 mg1 rpm signed LE
     {
-      uint16_t m_rpm = (uint16_t)constrain((long)abs(mg1_speed), 0L, 65535L);
+      int16_t m_rpm = (int16_t)constrain((long)mg1_speed, -32768L, 32767L);
       outframe.id = 0x0AC;
       outframe.length = 8;
       outframe.extended = 0;
@@ -1498,8 +1499,8 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
       outframe.data.bytes[3] = (uint8_t)constrain((int)(transmissionTemp + 0.5f), 0, 255);
       outframe.data.bytes[4] = (uint8_t)constrain((int)(oilPumpTemp + 0.5f), 0, 255);
       outframe.data.bytes[5] = (uint8_t)gear;
-      outframe.data.bytes[6] = lowByte(m_rpm);
-      outframe.data.bytes[7] = highByte(m_rpm);
+      outframe.data.bytes[6] = lowByte((uint16_t)m_rpm);
+      outframe.data.bytes[7] = highByte((uint16_t)m_rpm);
       Can0.sendFrame(outframe);
       Can1.sendFrame(outframe);
     }
