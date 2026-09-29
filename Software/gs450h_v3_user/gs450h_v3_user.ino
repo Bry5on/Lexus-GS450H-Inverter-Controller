@@ -882,11 +882,10 @@ static const float MG1_PER_OUT = 1.25f;
 static const int16_t ONE_PEDAL_PEDAL = 12;     // percent, closed-pedal zone
 static const int16_t ONE_PEDAL_FULL = 260;     // full hold below ~3 mph
 static const int16_t ONE_PEDAL_FADE = 450;     // pedal map alone above ~5 mph
-static const int16_t HOLD_DEADBAND = 25;       // freeze on the filtered speed, above the lash rock
-static const int16_t HOLD_RELEASE = 20;        // unload as soon as the hold starts the car moving
-static const int16_t HOLD_CREEP = 130;         // a steady roll below this always builds torque
-static const float HOLD_RAMP_UP = 12.0f;       // counts per 10 ms while rolling against the hold
-static const float HOLD_RAMP_DOWN = 24.0f;     // come off faster than it wound, once the car moves with it
+static const int16_t HOLD_DEADBAND = 8;        // filtered rpm, about 0.1 mph
+static const int16_t HOLD_CREEP = 130;         // build the stop only below ~1.5 mph
+static const float HOLD_K = 0.10f;             // counts per filtered rpm each 10 ms
+static const float HOLD_STEP_MAX = 8.0f;       // counts per 10 ms
 static const int16_t HOLD_CLAMP = 1600;
 static const int16_t LASH_PRELOAD = 250;       // +MG2 counts, cancelled by -MG1
 static const uint16_t HOLD_SETTLE_MS = 500;    // stopped this long, then drop the pinch
@@ -1030,7 +1029,7 @@ float roadRpm()
 void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 {
   bool tracking = mth_good && shiftPhase != PHASE_ACTUATE && shiftPhase != PHASE_CONFIRM;
-  if (tracking) roadFilt += (roadRpm() - roadFilt) * 0.02f;
+  if (tracking) roadFilt += (roadRpm() - roadFilt) * 0.01f;
 
   static float lashScale = 1.0f;
   static uint32_t stoppedSince = 0;
@@ -1056,28 +1055,17 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
     blend = ((float)ONE_PEDAL_FADE - av) / ((float)ONE_PEDAL_FADE - (float)ONE_PEDAL_FULL);
   }
 
-  // 1 mph is about 90 MG2 rpm, so a visible creep used to sit above the hold
-  // band (torque decayed) or inside the freeze (torque never increased).
-  static float prevRoad = 0.0f;
-  float dv = roadFilt - prevRoad;
-  prevRoad = roadFilt;
-  bool slowing = (roadFilt * dv) < -0.5f;
+  // The 5 Hz lash rock averages out of roadFilt. A roll that stays on one
+  // side does not, so the hold keeps changing until that average is near zero.
   if (av > (float)ONE_PEDAL_FADE) {
     holdI *= 0.85f;
   } else if (av <= (float)HOLD_DEADBAND) {
-    // Actually stopped. Keep the lash loaded.
-  } else if (holdI * roadFilt > 0.0f && av >= (float)HOLD_RELEASE) {
-    if (holdI > 0.0f) {
-      holdI -= HOLD_RAMP_DOWN;
-      if (holdI < 0.0f) holdI = 0.0f;
-    } else {
-      holdI += HOLD_RAMP_DOWN;
-      if (holdI > 0.0f) holdI = 0.0f;
-    }
-  } else if (holdI * roadFilt > 0.0f) {
-    // Small overshoot. Leave the torque alone so the lash stays taken up.
-  } else if (av <= (float)HOLD_CREEP || !slowing) {
-    holdI += roadFilt < 0.0f ? HOLD_RAMP_UP : -HOLD_RAMP_UP;
+    // Stopped. Keep whatever torque got it there.
+  } else if (av <= (float)HOLD_CREEP) {
+    float step = -HOLD_K * roadFilt;
+    if (step > HOLD_STEP_MAX) step = HOLD_STEP_MAX;
+    if (step < -HOLD_STEP_MAX) step = -HOLD_STEP_MAX;
+    holdI += step;
   }
   if (holdI > (float)HOLD_CLAMP) holdI = (float)HOLD_CLAMP;
   if (holdI < (float)-HOLD_CLAMP) holdI = (float)-HOLD_CLAMP;
