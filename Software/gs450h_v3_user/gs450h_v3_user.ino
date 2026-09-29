@@ -888,6 +888,8 @@ static const int16_t HOLD_CREEP = 130;         // a steady roll below this alway
 static const float HOLD_RAMP_UP = 12.0f;       // counts per 10 ms while rolling against the hold
 static const float HOLD_RAMP_DOWN = 4.0f;      // counts per 10 ms when unloading an overshoot
 static const int16_t HOLD_CLAMP = 1600;
+static const int16_t LASH_PRELOAD = 250;       // +MG2 counts, cancelled by -MG1
+static const uint16_t HOLD_SETTLE_MS = 500;    // stopped this long, then drop the pinch
 static const int16_t SLEW_STEP = 40;           // counts per 10 ms, same sign
 static const int16_t SLEW_STEP_ZERO = 20;      // counts per 10 ms while crossing lash
 static const uint16_t LASH_DWELL_MS = 50;
@@ -1027,15 +1029,24 @@ float roadRpm()
 
 void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
 {
-  (void)now;
   bool tracking = mth_good && shiftPhase != PHASE_ACTUATE && shiftPhase != PHASE_CONFIRM;
   if (tracking) roadFilt += (roadRpm() - roadFilt) * 0.25f;
+
+  static float lashScale = 1.0f;
+  static uint32_t stoppedSince = 0;
+  static bool holdTiming = false;
 
   bool coast = mth_good && gear == DRIVE && pedalPercent() <= ONE_PEDAL_PEDAL;
   if (!coast) {
     holdI *= 0.90f;
     if (holdI > -1.0f && holdI < 1.0f) holdI = 0.0f;
+    lashScale = 1.0f;
+    holdTiming = false;
     return;
+  }
+  if (!holdTiming) {
+    holdTiming = true;
+    stoppedSince = now;
   }
 
   float av = roadFilt < 0.0f ? -roadFilt : roadFilt;
@@ -1071,14 +1082,25 @@ void serviceOnePedal(int16_t &tgt1, int16_t &tgt2, uint32_t now)
   if (holdI > (float)HOLD_CLAMP) holdI = (float)HOLD_CLAMP;
   if (holdI < (float)-HOLD_CLAMP) holdI = (float)-HOLD_CLAMP;
 
+  if (av > (float)HOLD_DEADBAND) {
+    stoppedSince = now;
+    lashScale += 0.10f;
+    if (lashScale > 1.0f) lashScale = 1.0f;
+  } else if ((uint32_t)(now - stoppedSince) >= HOLD_SETTLE_MS) {
+    lashScale -= 0.02f;
+    if (lashScale < 0.0f) lashScale = 0.0f;
+  }
+
   if (blend <= 0.0f) return;
 
-  float t = holdI;
-  if (t > (float)HOLD_CLAMP) t = (float)HOLD_CLAMP;
-  if (t < (float)-HOLD_CLAMP) t = (float)-HOLD_CLAMP;
-  int16_t mg1Hold = mg1FromOut((int16_t)t);
-  tgt1 = (int16_t)(((1.0f - blend) * (float)tgt1) + (blend * (float)mg1Hold));
-  tgt2 = (int16_t)((1.0f - blend) * (float)tgt2);
+  // +MG2 and an equal -MG1 pinch the gear lash with no net wheel torque.
+  // After the car has been stopped, fade the pair and leave the grade on MG1.
+  int16_t mg2Pinch = (int16_t)((float)LASH_PRELOAD * lashScale + 0.5f);
+  int16_t mg1Pinch = (int16_t)(-mg1FromOut(outEquiv(mg2Pinch, ratioIsLow)));
+  int16_t mg1Hold = mg1FromOut((int16_t)holdI);
+  int16_t mg1Cmd = clamp16((int32_t)mg1Hold + (int32_t)mg1Pinch, -4375, 4375);
+  tgt1 = (int16_t)(((1.0f - blend) * (float)tgt1) + (blend * (float)mg1Cmd));
+  tgt2 = (int16_t)(((1.0f - blend) * (float)tgt2) + (blend * (float)mg2Pinch));
 }
 
 int16_t slewToward(int16_t &value, bool &dwelling, uint32_t &dwellUntil, int16_t target, uint32_t now, int16_t step)
