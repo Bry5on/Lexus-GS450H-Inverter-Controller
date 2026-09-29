@@ -126,7 +126,7 @@ int maxDtorque=0, maxRtorque=0; //max torque values in variable form for math la
 int16_t torque = 0, smoothtorque = 0; //torque command mapped from -3500 to 3500 for inverter control
 
 /////////////throttle input smoothing variables///////////////
-const int numReadings = 15;
+const int numReadings = 20;
 int readings[numReadings];      // the readings from the analog input
 int readIndex = 0;              // the index of the current reading
 int total = 0;                  // the running total
