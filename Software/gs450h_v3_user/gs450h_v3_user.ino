@@ -1248,11 +1248,12 @@ void updateBrakeLight()
             (mg2_torque < -70 && mg2_speed > 0) ||
             (mg2_torque > 70 && mg2_speed < 0);
   }
-  bool closedPedal = ThrotVal <= (parameters.Min_throttleVal + ThrotRange / 64);
-  bool pedalReleased = ThrotVal > (parameters.Min_throttleVal + ThrotRange / 16);
+  int32_t onLevel = (int32_t)parameters.Min_throttleVal + (int32_t)ThrotRange / 64;
+  int32_t offLevel = onLevel + (int32_t)ThrotRange / 64;
   static bool brakeLamp = false;
-  if (regen || closedPedal) brakeLamp = true;
-  else if (pedalReleased) brakeLamp = false;
+  if (ThrotVal <= onLevel) brakeLamp = true;
+  else if (ThrotVal > offLevel) brakeLamp = false;
+  else if (regen) brakeLamp = true;
   digitalWrite(Out1, brakeLamp ? HIGH : LOW);
 }
 
