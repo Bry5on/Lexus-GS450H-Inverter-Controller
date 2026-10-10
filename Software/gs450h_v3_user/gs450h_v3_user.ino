@@ -1351,8 +1351,11 @@ void Frames100MS() // gauge + OBD frames; period set by timer_Frames100 (100 ms)
     outframe.data.bytes[3] = CoolantCAN; //coolant temp in C. Gauge range 0 - 100C
     outframe.data.bytes[4] = lowByte((uint16_t)shaft_rpm);
     outframe.data.bytes[5] = highByte((uint16_t)shaft_rpm);
-    outframe.data.bytes[6] = (uint8_t)(fabsf(Sensor.Amperes) / 2.0f); // |A|/2, divide before uint8 (avoids wrap at 256A)
-    outframe.data.bytes[7] = 0x00;
+    // |A|*10 across b6-7 LE. 0.1A steps, good to 6553A. The old b6=|A|/2
+    // uint8 wrapped to 0 at 512A and the tach dropped out.
+    uint16_t amps10 = (uint16_t)constrain((long)(fabsf(Sensor.Amperes) * 10.0f), 0L, 65535L);
+    outframe.data.bytes[6] = lowByte(amps10);
+    outframe.data.bytes[7] = highByte(amps10);
 
     Can0.sendFrame(outframe);
     Can1.sendFrame(outframe);
